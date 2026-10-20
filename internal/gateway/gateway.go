@@ -68,16 +68,18 @@ const proxyUnavailableMessage = "all proxies are unavailable; the upstream could
 // config; applying a new config builds a new Gateway (see RuntimeController)
 // instead of mutating this one.
 type Gateway struct {
-	rotation     *rotation.Manager
-	cfg          config.Config
-	logger       *slog.Logger
-	transports   *proxyTransports
-	zenNodes     *upstreamNodes
-	goNodes      *upstreamNodes
-	anonymous    *anonymousNodes
-	catalog      *models.ModelCatalog
-	monitor      *telemetry.Metrics
-	availability *models.AvailabilityRegistry
+	rotation         *rotation.Manager
+	cfg              config.Config
+	logger           *slog.Logger
+	transports       *proxyTransports
+	zenNodes         *upstreamNodes
+	goNodes          *upstreamNodes
+	anonymous        *anonymousNodes
+	catalogAnonymous *anonymousNodes
+	publicPool       *proxyCleanPool
+	catalog          *models.ModelCatalog
+	monitor          *telemetry.Metrics
+	availability     *models.AvailabilityRegistry
 	// attemptTimeout bounds a whole upstream attempt (dial + write + headers
 	// and, when the first-event wait is enabled, the first event), not just
 	// the header wait. Zero arms no per-attempt deadline: each attempt is then
@@ -112,17 +114,29 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics) (*G
 	catalog := models.Catalog(cfg.Prefer, cfg.Models.Protocols)
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	catalog.SetFreeOnly(cfg.Models.FreeOnly)
+	staticAnonymous := anonymousPool(cfg.Anonymous, transports, cooldown)
+	anonymous := staticAnonymous
+	var publicPool *proxyCleanPool
+	if cfg.ProxyClean.Enabled && cfg.Anonymous {
+		publicPool, err = newProxyCleanPool(cfg)
+		if err != nil {
+			return nil, err
+		}
+		anonymous = &anonymousNodes{dynamic: publicPool, cooldown: time.Duration(publicPool.cfg.CooldownSeconds) * time.Second}
+	}
 	return &Gateway{
-		cfg:            cfg,
-		rotation:       rotationManager,
-		logger:         logger,
-		transports:     transports,
-		zenNodes:       zenNodes,
-		goNodes:        goNodes,
-		anonymous:      anonymousPool(cfg.Anonymous, transports, cooldown),
-		catalog:        catalog,
-		monitor:        monitor,
-		attemptTimeout: attemptDeadline(cfg),
+		cfg:              cfg,
+		rotation:         rotationManager,
+		logger:           logger,
+		transports:       transports,
+		zenNodes:         zenNodes,
+		goNodes:          goNodes,
+		anonymous:        anonymous,
+		catalogAnonymous: staticAnonymous,
+		publicPool:       publicPool,
+		catalog:          catalog,
+		monitor:          monitor,
+		attemptTimeout:   attemptDeadline(cfg),
 	}, nil
 }
 

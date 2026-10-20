@@ -6,6 +6,21 @@
   "anonymous": false,
   "proxies": ["direct"],
   "proxyfile": "",
+  "proxyclean": {
+    "enabled": false,
+    "sources": ["proxyclean"],
+    "scope": "anonymous-only",
+    "source_url": "https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt",
+    "refresh_seconds": 3600,
+    "ttl_seconds": 7200,
+    "probe_interval_seconds": 300,
+    "probe_timeout_seconds": 8,
+    "probe_concurrency": 8,
+    "max_candidates": 100,
+    "max_nodes": 20,
+    "cooldown_seconds": 60,
+    "allow_direct_fallback": false
+  },
   "upstream": {
     "zen": "https://opencode.ai/zen",
     "go": "https://opencode.ai/zen/go",
@@ -13,7 +28,9 @@
   },
   "retry": {
     "max_attempts": 3,
-    "timeout_seconds": 300
+    "timeout_seconds": 300,
+    "backoff_initial_ms": 0,
+    "backoff_max_ms": 0
   },
   "models": {
     "refresh_seconds": 300,

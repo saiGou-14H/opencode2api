@@ -30,13 +30,18 @@ import (
 // upstream HTTP responses (see syncProxyResult) or a passing health check;
 // checking claims the single health check allowed in flight.
 type proxyTransport struct {
-	index    int
-	name     string
-	pool     bool
-	client   *http.Client
-	bun      *http.Client
-	healthy  atomic.Bool
-	checking atomic.Bool
+	// Public anonymous nodes have one transport each. This mutex and version
+	// serialize their business health/cooldown updates with probe commits.
+	publicStateMu    sync.Mutex
+	publicGeneration uint64
+	public           bool
+	index            int
+	name             string
+	pool             bool
+	client           *http.Client
+	bun              *http.Client
+	healthy          atomic.Bool
+	checking         atomic.Bool
 }
 
 // proxyTransports holds every configured proxy route, indexed by
@@ -49,10 +54,14 @@ type proxyTransports struct {
 // cooldown per proxy. Unlike key nodes, anonymous nodes are never rebound:
 // changing proxy is the failover mechanism because Zen rate-limits them by IP.
 type anonymousNodes struct {
-	nodes    []*anonymousNode
-	next     atomic.Uint64
-	cooldown time.Duration
-	hasPool  bool
+	dynamic      *proxyCleanPool
+	blockedUntil *atomic.Int64
+	strict       bool
+	expires      time.Time
+	nodes        []*anonymousNode
+	next         atomic.Uint64
+	cooldown     time.Duration
+	hasPool      bool
 }
 
 type anonymousNode struct {
@@ -92,6 +101,9 @@ func (p *anonymousNodes) Len() int {
 	if p == nil {
 		return 0
 	}
+	if p.dynamic != nil {
+		return p.dynamic.current().Len()
+	}
 	return len(p.nodes)
 }
 
@@ -105,6 +117,9 @@ func (p *anonymousNodes) HasPool() bool {
 // affinity key, keeping a conversation on one exit; an empty affinity rotates
 // the starting node round-robin.
 func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
+	if p != nil && p.dynamic != nil {
+		return p.dynamic.current().CursorFor(affinity)
+	}
 	if p == nil || len(p.nodes) == 0 {
 		return anonymousCursor{pool: p}
 	}
@@ -129,7 +144,10 @@ func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
 // those, the one whose cooldown expires earliest, and returns nil only once
 // every node has been returned.
 func (c *anonymousCursor) Next() *anonymousNode {
-	if c.pool == nil || len(c.pool.nodes) == 0 {
+	if c.pool != nil && c.pool.blockedUntil != nil && c.pool.blockedUntil.Load() > time.Now().UnixNano() {
+		return nil
+	}
+	if c.pool == nil || len(c.pool.nodes) == 0 || (!c.pool.expires.IsZero() && !time.Now().Before(c.pool.expires)) {
 		return nil
 	}
 	n := len(c.pool.nodes)
@@ -145,6 +163,9 @@ func (c *anonymousCursor) Next() *anonymousNode {
 			c.used[idx] = true
 			return node
 		}
+	}
+	if c.pool.strict {
+		return nil
 	}
 	if c.pool.hasPool {
 		for range n {
@@ -181,6 +202,11 @@ func (c *anonymousCursor) Next() *anonymousNode {
 func (p *anonymousNodes) MarkSuccess(node *anonymousNode) {
 	if node == nil {
 		return
+	}
+	if node.proxy != nil && node.proxy.public {
+		node.proxy.publicStateMu.Lock()
+		defer node.proxy.publicStateMu.Unlock()
+		node.proxy.publicGeneration++
 	}
 	node.failures.Store(0)
 	node.cooldownUntil.Store(0)
@@ -226,8 +252,25 @@ const maxAnonymousRetryAfterMultiplier = 8
 // base cooldown up to 8x, and a longer Retry-After extends it up to that same
 // 8x ceiling.
 func (p *anonymousNodes) MarkFailure(node *anonymousNode, resp *http.Response, err error) {
+	// Authentication/quota restrictions cool the entire public lane, including
+	// direct fallback, so a new request cannot immediately switch exit IP.
+	if p.dynamic != nil && resp != nil && (resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 429) {
+		delay := p.cooldown
+		if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > delay {
+			delay = retryAfter
+		}
+		until := time.Now().Add(delay).UnixNano()
+		gate := p.dynamic.blockedUntil
+		for old := gate.Load(); until > old && !gate.CompareAndSwap(old, until); old = gate.Load() {
+		}
+	}
 	if node == nil || (node.proxy != nil && node.proxy.pool) {
 		return
+	}
+	if node.proxy != nil && node.proxy.public {
+		node.proxy.publicStateMu.Lock()
+		defer node.proxy.publicStateMu.Unlock()
+		node.proxy.publicGeneration++
 	}
 	if err == nil && resp != nil && resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
 		return

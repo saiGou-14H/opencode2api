@@ -22,6 +22,8 @@ WebUI 内嵌在可执行文件中，运行服务无需 Node.js 或数据库。
 
 新增页面及调用示例见[管理控制台说明](docs/management.zh-CN.md)。
 
+本 fork 的匿名 ProxyClean 自动代理池、健康维护及重试退避配置见[接入与安全说明](docs/proxyclean.zh-CN.md)。公共池默认关闭，付费 Key 不进入公共代理线路。
+
 ## 快速开始
 
 从 [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases) 下载可执行文件，或使用 **Go 1.24 及以上版本**编译：

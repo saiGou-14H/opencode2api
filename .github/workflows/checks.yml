@@ -28,6 +28,11 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           cache: true
+      - name: Test
+        run: go test ./...
+      - name: Race test
+        if: runner.os == 'Linux'
+        run: go test -race ./...
       - name: Vet
         run: go vet ./...
       - name: Build
@@ -58,5 +63,7 @@ jobs:
           for f in webui/js/*.js webui/js/pages/*.js; do
             node --input-type=module --check < "$f" || { echo "syntax error: $f" >&2; exit 1; }
           done
+      - name: Test WebUI configuration
+        run: node --test webui/tests/*.test.mjs
       - name: Check container entrypoint syntax
         run: sh -n docker-entrypoint.sh

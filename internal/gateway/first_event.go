@@ -174,6 +174,15 @@ func (b *attemptBody) Close() error {
 // errFirstEventTimeout as the error when that deadline caused the failure, and
 // closing the returned body also releases the attempt's context.
 func doInferenceAttempt(client *http.Client, req *http.Request, firstEventTimeout, attemptTimeout time.Duration) (*http.Response, error) {
+	// Keep the attempt budget authoritative: neither redirects nor transport
+	// replay of a rewindable POST may create invisible extra upstream calls.
+	req.GetBody = nil
+	boundedClient := *client
+	boundedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &boundedClient
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
 	if (firstEventTimeout <= 0 && attemptTimeout <= 0) || strings.HasSuffix(req.URL.Path, "/systemone") {
 		return client.Do(req)
 	}

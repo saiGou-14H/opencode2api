@@ -27,6 +27,21 @@ const (
 // an HTTP response only start the background check, which never affects the
 // return value.
 func (g *Gateway) syncProxyResult(ctx context.Context, proxy *proxyTransport, status int, err error) bool {
+	// Public routes never participate in paid-key binding or the legacy
+	// background probes. Their bounded worker handles recovery.
+	if proxy != nil && proxy.public {
+		proxy.publicStateMu.Lock()
+		defer proxy.publicStateMu.Unlock()
+		proxy.publicGeneration++
+		if status > 0 {
+			proxy.healthy.Store(true)
+			return false
+		}
+		if err != nil && ctx.Err() == nil {
+			proxy.healthy.Store(false)
+		}
+		return isProxyFailure(err)
+	}
 	if proxy == nil || proxy.pool {
 		return false
 	}
@@ -247,15 +262,12 @@ func (g *Gateway) refreshZen(ctx context.Context) []string {
 	return g.refreshAnonymousTier(ctx, g.cfg.Upstream.Anonymous)
 }
 
-// refreshAnonymousTier lists models with the public credential, one anonymous
-// node per attempt: one pass over the nodes, or up to retry.max_attempts
-// attempts when #pool transports exist. base only labels the logs.
+// refreshAnonymousTier lists models using the public credential. The shared
+// attempt cap counts each origin call, not proxy draws. base labels the logs.
 func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []string {
-	cursor := g.anonymous.CursorFor("")
-	limit := g.anonymous.Len()
-	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
-		limit = g.cfg.Retry.MaxAttempts
-	}
+	cursor := g.catalogAnonymous.CursorFor("")
+	limit := g.cfg.Retry.MaxAttempts
+	attempts := 0
 	for attempt := 1; attempt <= limit; attempt++ {
 		node := cursor.Next()
 		if node == nil {
@@ -268,7 +280,16 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 		// List models on the v1 origin first, then fall back to the
 		// configured v2 /inference origin (see anonymousUpstreams).
 		for _, upstream := range g.anonymousUpstreams() {
+			if beforeRetry(refreshCtx, g.cfg.Retry, attempts) != nil {
+				cancel()
+				return nil
+			}
+			attempts++
 			models, status, err = modelcatalog.FetchModels(refreshCtx, node.proxy.client, upstream, anonymousZenKey)
+			if ctx.Err() != nil || status == 401 || status == 403 || status == 429 {
+				cancel()
+				return nil
+			}
 			if err == nil || isProxyFailure(err) {
 				break
 			}
@@ -276,10 +297,10 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 		g.syncProxyResult(refreshCtx, node.proxy, status, err)
 		cancel()
 		if err == nil {
-			g.anonymous.MarkSuccess(node)
+			g.catalogAnonymous.MarkSuccess(node)
 			return models
 		}
-		g.anonymous.MarkFailure(node, nil, err)
+		g.catalogAnonymous.MarkFailure(node, nil, err)
 		g.logger.Debug("anonymous model catalog refresh attempt failed", "component", "models", "event", "anonymous_refresh_attempt_failed", "upstream", config.RedactURL(base), "attempt", attempt, "proxy", config.RedactURL(node.proxy.name), "error", err)
 	}
 	g.logger.Warn("anonymous model catalog refresh failed", "component", "models", "event", "anonymous_refresh_failed", "upstream", config.RedactURL(base))
@@ -292,6 +313,9 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 func (g *Gateway) refreshTier(ctx context.Context, base string, nodes *upstreamNodes) []string {
 	cursor := nodes.Cursor()
 	for attempt := 0; attempt < g.cfg.Retry.MaxAttempts; attempt++ {
+		if beforeRetry(ctx, g.cfg.Retry, attempt) != nil {
+			return nil
+		}
 		node := cursor.Next()
 		if node == nil {
 			return nil
@@ -303,6 +327,10 @@ func (g *Gateway) refreshTier(ctx context.Context, base string, nodes *upstreamN
 			return nil
 		}
 		models, status, err := modelcatalog.FetchModels(refreshCtx, proxy.client, base, node.key)
+		if ctx.Err() != nil || status == 401 || status == 403 || status == 429 {
+			cancel()
+			return nil
+		}
 		g.syncProxyResult(refreshCtx, proxy, status, err)
 		cancel()
 		if err == nil {

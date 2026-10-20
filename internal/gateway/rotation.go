@@ -81,15 +81,13 @@ type groupAttempt struct {
 }
 
 // handleRotation serves a request addressed to a rotation group alias on the
-// Go tier. It walks the group's usable models from the current one, giving
-// each up to three single-call attempts. A quota or rate-limit failure pauses
-// the model for its Retry-After (60 seconds without one) and moves on to the
-// next model; a model that fails a third time for another reason is paused
-// for 15 seconds. The walk ends on success, once a reply has been committed
-// downstream, once three models have failed for ordinary reasons, when no
-// usable model is left, or when the request budget runs out. Unless the client
-// went away, a request left without a reply then gets a 503, or a 504 when
-// the budget ran out.
+// Go tier. Each model gets at most three calls, within the request-wide
+// Retry.MaxAttempts cap and backoff. HTTP 401/403/429 are relayed immediately
+// (including Retry-After), without changing model, key or proxy. Other quota
+// failures pause the model and move on; three ordinary failures pause it for
+// 15 seconds. The walk ends on success, after downstream commitment, after
+// three ordinary model failures, or when no usable model or budget remains.
+// Unanswered requests receive 503, or 504 when the total deadline expires.
 func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, external wire.Protocol, payload map[string]any, id, alias string) {
 	g.syncRotation()
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
@@ -103,7 +101,8 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 	}
 	visited := map[string]bool{}
 	ordinaryModels, total := 0, 0
-	for ctx.Err() == nil {
+rotationLoop:
+	for ctx.Err() == nil && total < g.cfg.Retry.MaxAttempts {
 		token, ok := g.rotation.Select(id, visited)
 		if !ok {
 			break
@@ -115,6 +114,9 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 		}
 		counted := false
 		for n := 1; n <= 3 && ctx.Err() == nil; n++ {
+			if err := beforeRetry(ctx, g.cfg.Retry, total); err != nil {
+				break rotationLoop
+			}
 			total++
 			if meta != nil {
 				meta.Model = token.Model
@@ -256,7 +258,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	if resp != nil {
 		defer resp.Body.Close()
 	}
-	if parent.Err() == nil {
+	if parent.Err() == nil && !terminalRetryResponse(resp) {
 		g.observeKeyResult(parent, g.goNodes, node, proxy, resp, err)
 	}
 	if err != nil {
@@ -273,6 +275,14 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		result.pause = 0
 	} else if _, err := http.ParseTime(retryAfter); err == nil {
 		result.pause = 0
+	}
+	if terminalRetryResponse(resp) {
+		copyErrorResponse(w, external, resp, ids.Request)
+		result.committed = true
+		result.err = fmt.Errorf("upstream HTTP %d", resp.StatusCode)
+		result.reason = fmt.Sprintf("http_%d", resp.StatusCode)
+		result.quota = resp.StatusCode == http.StatusTooManyRequests
+		return result
 	}
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

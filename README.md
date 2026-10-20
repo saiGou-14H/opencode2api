@@ -22,6 +22,8 @@ The executable includes the WebUI. Running the service requires no Node.js runti
 
 See the [management console guide (Chinese)](docs/management.zh-CN.md) for the new pages and configuration.
 
+This fork adds an opt-in, anonymous-only ProxyClean SOCKS5 candidate pool with local health maintenance and configurable retry backoff. Paid keys retain their existing routes. See the [integration and safety guide (Chinese)](docs/proxyclean.zh-CN.md); public proxies remain untrusted and TLS verification is never disabled.
+
 ## Quick start
 
 Download a binary from [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases), or build with **Go 1.24 or newer**:

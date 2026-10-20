@@ -57,6 +57,7 @@ func (a *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/login", a.handleLogin)
 	mux.Handle("GET /api/auth/session", a.authenticate(http.HandlerFunc(a.handleSession)))
 	mux.Handle("POST /api/auth/logout", a.authenticate(a.csrf(http.HandlerFunc(a.handleLogout))))
+	mux.Handle("GET /api/proxyclean", a.authenticate(http.HandlerFunc(a.handleProxyClean)))
 	mux.Handle("GET /api/config", a.authenticate(http.HandlerFunc(a.handleGetConfig)))
 	mux.Handle("PUT /api/config", a.authenticate(a.csrf(http.HandlerFunc(a.handlePutConfig))))
 	mux.Handle("POST /api/config/reload", a.authenticate(a.csrf(http.HandlerFunc(a.handleReload))))
@@ -128,6 +129,7 @@ type SecretView struct {
 // masked, plus the listeners that are actually in effect and the fields whose
 // change needs a restart.
 type ConfigView struct {
+	ProxyClean  config.ProxyCleanConfig  `json:"proxyclean"`
 	Listen      string                   `json:"listen"`
 	ServerKeys  []SecretView             `json:"server_keys"`
 	ZenKeys     []SecretView             `json:"zen_keys"`
@@ -175,6 +177,7 @@ type SecretInput struct {
 // value or the ID of the existing one. The WebUI username and password are
 // not changed here; they go through /api/account.
 type ConfigUpdate struct {
+	ProxyClean  *config.ProxyCleanConfig `json:"proxyclean,omitempty"`
 	Listen      string                   `json:"listen"`
 	ServerKeys  []SecretInput            `json:"server_keys"`
 	ZenKeys     []SecretInput            `json:"zen_keys"`
@@ -235,7 +238,12 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if update.Reasoning != nil {
 		reasoning = *update.Reasoning
 	}
+	proxyClean := current.ProxyClean
+	if update.ProxyClean != nil {
+		proxyClean = *update.ProxyClean
+	}
 	candidate := config.Config{
+		ProxyClean:        proxyClean,
 		ServerKeyMetadata: current.ServerKeyMetadata,
 		Rotation:          current.Rotation,
 		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
@@ -380,7 +388,8 @@ func (a *Server) configView() ConfigView {
 	cfg := a.manager.Config()
 	effective, restart := a.manager.RestartStatus()
 	return ConfigView{
-		Listen: cfg.Listen, ServerKeys: maskSecrets(cfg.ServerKeys, false), ZenKeys: maskSecrets(cfg.ZenKeys, false), GoKeys: maskSecrets(cfg.GoKeys, false), Anonymous: cfg.Anonymous,
+		ProxyClean: cfg.ProxyClean,
+		Listen:     cfg.Listen, ServerKeys: maskSecrets(cfg.ServerKeys, false), ZenKeys: maskSecrets(cfg.ZenKeys, false), GoKeys: maskSecrets(cfg.GoKeys, false), Anonymous: cfg.Anonymous,
 		Proxies: maskSecrets(cfg.Proxies, true), ProxyFile: cfg.ProxyFile, Upstream: cfg.Upstream, Retry: cfg.Retry, Models: cfg.Models,
 		Performance: cfg.Performance, Logging: cfg.Logging, Prefer: cfg.Prefer, Reasoning: cfg.Reasoning,
 		WebUI:     WebUIView{Enabled: cfg.WebUI.Enabled, Listen: cfg.WebUI.Listen, Username: cfg.WebUI.Username, SessionTTLMinutes: cfg.WebUI.SessionTTLMinutes},

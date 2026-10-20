@@ -45,6 +45,139 @@ function secretInputs(name) {
 
 const numberValue = (selector) => Number($(selector).value);
 
+function retryInputs() {
+  const readBackoff = (selector) => {
+    const raw = $(selector).value.trim();
+    const value = Number(raw);
+    if (!raw || !Number.isInteger(value) || value < 0 || value > 86400000) {
+      throw new Error(t("退避必须是 0–86400000 毫秒的整数", "config.retry.invalidRange"));
+    }
+    return value;
+  };
+  const initial = readBackoff("#c-backoff-initial");
+  const maximum = readBackoff("#c-backoff-max");
+  if (maximum > 0 && maximum < initial) {
+    throw new Error(t("最大退避大于 0 时不得小于首轮退避", "config.retry.invalidMax"));
+  }
+  return {
+    max_attempts: numberValue("#c-attempts"),
+    timeout_seconds: numberValue("#c-timeout"),
+    backoff_initial_ms: initial,
+    backoff_max_ms: maximum,
+  };
+}
+
+const proxyCleanSource = "https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt";
+const proxyCleanSourceIds = ["proxyclean", "proxifly", "thespeedx", "roosterkid", "hookzof", "gfpcom", "dpangestuw"];
+// Defaults and bounds mirror the restricted backend contract.
+const proxyCleanNumbers = {
+  refresh_seconds: [3600, 30, 86400],
+  ttl_seconds: [7200, 30, 172800],
+  probe_interval_seconds: [300, 10, 3600],
+  probe_timeout_seconds: [8, 1, 30],
+  probe_concurrency: [8, 1, 32],
+  max_candidates: [100, 1, 1000],
+  max_nodes: [20, 1, 100],
+  cooldown_seconds: [60, 1, 3600],
+};
+
+function fillProxyClean(value = {}) {
+  $("#c-pc-enabled").checked = !!value.enabled;
+  $("#c-pc-fallback").checked = !!value.allow_direct_fallback;
+  $("#c-pc-scope").value = value.scope ?? "anonymous-only";
+  $("#c-pc-source").value = value.source_url ?? proxyCleanSource;
+  const sources = Array.isArray(value.sources) && value.sources.length ? value.sources : ["proxyclean"];
+  for (const id of proxyCleanSourceIds) $("#c-pc-source-" + id).checked = sources.includes(id);
+  for (const [key, [fallback]] of Object.entries(proxyCleanNumbers)) {
+    $(`#c-pc-${key}`).value = value[key] ?? fallback;
+  }
+}
+
+function proxyCleanInputs() {
+  const sources = proxyCleanSourceIds.filter((id) => $("#c-pc-source-" + id).checked);
+  if (!sources.length) {
+    throw new Error(t("请至少选择一个 ProxyClean 来源", "config.proxyclean.sourcesRequired"));
+  }
+  const value = {
+    sources,
+    enabled: $("#c-pc-enabled").checked,
+    scope: "anonymous-only",
+    source_url: proxyCleanSource,
+    allow_direct_fallback: $("#c-pc-fallback").checked,
+  };
+  for (const [key, [, min, max]] of Object.entries(proxyCleanNumbers)) {
+    const raw = $(`#c-pc-${key}`).value.trim();
+    const number = Number(raw);
+    if (!raw || !Number.isInteger(number) || number < min || number > max) {
+      throw new Error(t(`ProxyClean ${key} 必须是 ${min}–${max} 的整数`, "config.proxyclean.invalidRange", key, min, max));
+    }
+    value[key] = number;
+  }
+  if (value.ttl_seconds < value.refresh_seconds) {
+    throw new Error(t("ProxyClean 节点有效期不得小于刷新间隔", "config.proxyclean.invalidTTL"));
+  }
+  if (value.max_nodes > value.max_candidates) {
+    throw new Error(t("ProxyClean 最大可用节点数不得超过候选数", "config.proxyclean.invalidNodes"));
+  }
+  return value;
+}
+
+let proxyCleanStatus = null;
+let proxyCleanStatusFailed = false;
+function renderProxyCleanStatus() {
+  const host = $("#proxyclean-status");
+  if (proxyCleanStatusFailed) {
+    host.textContent = t("无法读取 ProxyClean 状态，请检查登录状态或稍后重试。", "config.proxyclean.statusFailed");
+    return;
+  }
+  if (!proxyCleanStatus) return;
+  const value = proxyCleanStatus;
+  const states = { disabled: "已关闭", loading: "加载中", ready: "可用", degraded: "降级", empty: "空池", expired: "已过期" };
+  const status = Object.hasOwn(states, value.source_status)
+    ? t(states[value.source_status], `config.proxyclean.state.${value.source_status}`)
+    : t("未知", "config.proxyclean.unknown");
+  const count = (n) => Number.isSafeInteger(n) && n >= 0 ? n : "—";
+  const timestamp = (s) => typeof s === "string" && Number.isFinite(Date.parse(s)) ? new Date(s).toISOString() : "—";
+  const errorCode = typeof value.last_error === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(value.last_error) ? value.last_error : "—";
+  const enabled = value.enabled ? t("已启用", "config.proxyclean.on") : t("已关闭", "config.proxyclean.state.disabled");
+  const scope = value.scope === "anonymous-only" ? value.scope : "—";
+  // Only documented status fields are rendered as text, never HTML or raw errors.
+  host.textContent = [
+    t(`运行状态：${enabled} / ${status}；作用域：${scope}`, "config.proxyclean.statusSummary", enabled, status, scope),
+    t(`候选节点：${count(value.candidate_count)}；健康节点：${count(value.healthy_count)}`, "config.proxyclean.statusCounts", count(value.candidate_count), count(value.healthy_count)),
+    t(`最近刷新：${timestamp(value.last_refresh_at)}；过期时间：${timestamp(value.expires_at)}`, "config.proxyclean.statusTimes", timestamp(value.last_refresh_at), timestamp(value.expires_at)),
+    t(`最近错误（安全码）：${errorCode}`, "config.proxyclean.statusError", errorCode),
+  ].join("\n");
+  const sourceStates = { pending: "等待采集", ready: "可用", empty: "空源", error: "失败" };
+  const seen = new Set();
+  for (const source of Array.isArray(value.sources) ? value.sources : []) {
+    if (!source || !proxyCleanSourceIds.includes(source.id) || seen.has(source.id)) continue;
+    seen.add(source.id);
+    const state = Object.hasOwn(sourceStates, source.status)
+      ? t(sourceStates[source.status], `config.proxyclean.sourceState.${source.status}`)
+      : t("未知", "config.proxyclean.unknown");
+    const code = typeof source.last_error === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(source.last_error) ? source.last_error : "—";
+    const fetched = timestamp(source.last_fetch_at);
+    const candidates = count(source.candidate_count);
+    host.textContent += "\n" + t(`${source.id}：${state}；候选：${candidates}；最近采集：${fetched}；安全码：${code}`, "config.proxyclean.sourceStatus", source.id, state, candidates, fetched, code);
+  }
+}
+
+async function refreshProxyCleanStatus() {
+  const button = $("#proxyclean-status-refresh");
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    proxyCleanStatus = await api("/api/proxyclean", { method: "GET" });
+    proxyCleanStatusFailed = !proxyCleanStatus || typeof proxyCleanStatus !== "object";
+  } catch {
+    proxyCleanStatusFailed = true;
+  } finally {
+    renderProxyCleanStatus();
+    button.disabled = false;
+  }
+}
+
 function fillConfig(value) {
   if (!value) return;
   $("#c-listen").value = value.listen;
@@ -54,10 +187,13 @@ function fillConfig(value) {
   $("#c-web-enabled").checked = value.webui.enabled;
   $("#c-anonymous").checked = !!value.anonymous;
   $("#c-proxyfile").value = value.proxyfile;
+  fillProxyClean(value.proxyclean ?? {});
   $("#c-up-zen").value = value.upstream.zen;
   $("#c-up-go").value = value.upstream.go;
   $("#c-attempts").value = value.retry.max_attempts;
   $("#c-timeout").value = value.retry.timeout_seconds;
+  $("#c-backoff-initial").value = value.retry.backoff_initial_ms ?? 0;
+  $("#c-backoff-max").value = value.retry.backoff_max_ms ?? 0;
   $("#c-refresh").value = value.models.refresh_seconds;
   $("#c-protocols").value = JSON.stringify(value.models.protocols || {}, null, 2);
   $("#c-free-only").checked = !!value.models.free_only;
@@ -94,7 +230,8 @@ async function save(event) {
       proxyfile: $("#c-proxyfile").value,
       prefer: $("#c-prefer").value,
       upstream: { zen: $("#c-up-zen").value, go: $("#c-up-go").value },
-      retry: { max_attempts: numberValue("#c-attempts"), timeout_seconds: numberValue("#c-timeout") },
+      retry: retryInputs(),
+      proxyclean: proxyCleanInputs(),
       models: {
         refresh_seconds: numberValue("#c-refresh"),
         protocols: JSON.parse($("#c-protocols").value || "{}"),
@@ -209,7 +346,9 @@ export default {
     $("#config-form").addEventListener("submit", save);
     $("#reload-config").addEventListener("click", reload);
     $("#reveal").addEventListener("click", reveal);
+    $("#proxyclean-status-refresh").addEventListener("click", refreshProxyCleanStatus);
     onChange(() => {
+      renderProxyCleanStatus();
       const value = store.get("config");
       if (value) renderRestartNotice(value);
       // Update chip tooltips in place so pending unsaved chip removals survive a language switch.

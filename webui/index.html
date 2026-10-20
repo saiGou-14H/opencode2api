@@ -861,6 +861,75 @@
                     </div>
                   </div>
                 </section>
+                <section class="section">
+                  <div class="section-head">
+                    <div>
+                      <h2 class="section-title" data-i18n="config.proxyclean.title">ProxyClean 公共免费代理池</h2>
+                      <p class="section-caption" data-i18n="config.proxyclean.warning">仅供匿名模型使用公共免费节点，付费 Key 保持原线路。保留端到端 TLS，但公共节点不保证可靠性；不会通过换 IP 绕过 401/403/429，429 遵循 Retry-After。空池默认失败，不会偷偷直连；只有显式开启直连回退才允许直连。</p>
+                    </div>
+                  </div>
+                  <div class="form-grid">
+                    <div class="field full">
+                      <label class="check"><input id="c-pc-enabled" type="checkbox" /><span data-i18n="config.proxyclean.enabled">启用 ProxyClean（默认关闭，仅匿名通道）</span></label>
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-scope" data-i18n="config.proxyclean.scope">作用域（固定）</label>
+                      <input id="c-pc-scope" value="anonymous-only" readonly />
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-source" data-i18n="config.proxyclean.source">旧版官方来源 URL（只读兼容字段）</label>
+                      <input id="c-pc-source" value="https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt" readonly />
+                    </div>
+                    <fieldset class="field full" aria-describedby="proxyclean-sources-help">
+                      <legend data-i18n="config.proxyclean.sources">采集来源（至少选择一项）</legend>
+                      <label class="check"><input id="c-pc-source-proxyclean" type="checkbox" checked />ProxyClean (proxyclean)</label>
+                      <label class="check"><input id="c-pc-source-proxifly" type="checkbox" />Proxifly (proxifly)</label>
+                      <label class="check"><input id="c-pc-source-thespeedx" type="checkbox" />TheSpeedX (thespeedx)</label>
+                      <label class="check"><input id="c-pc-source-roosterkid" type="checkbox" />RoosterKid (roosterkid)</label>
+                      <label class="check"><input id="c-pc-source-hookzof" type="checkbox" />Hookzof (hookzof)</label>
+                      <label class="check"><input id="c-pc-source-gfpcom" type="checkbox" />GFPCom (gfpcom)</label>
+                      <label class="check"><input id="c-pc-source-dpangestuw" type="checkbox" />dpangestuw</label>
+                      <p id="proxyclean-sources-help" class="section-caption" data-i18n="config.proxyclean.sourcesHelp">选中的来源列表生效；上方 source_url 仅为旧版兼容字段，不覆盖来源选择。旧配置省略或空来源列表默认使用 proxyclean。单源失败不阻断其他来源；候选节点从各源轮询公平合并并去重。公共池默认仍关闭。</p>
+                    </fieldset>
+                    <div class="field">
+                      <label for="c-pc-refresh_seconds" data-i18n="config.proxyclean.refresh">来源刷新间隔（秒）</label>
+                      <input id="c-pc-refresh_seconds" type="number" min="30" max="86400" step="1" value="3600" required />
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-ttl_seconds" data-i18n="config.proxyclean.ttl">节点有效期（秒，不小于刷新间隔）</label>
+                      <input id="c-pc-ttl_seconds" type="number" min="30" max="172800" step="1" value="7200" required />
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-probe_interval_seconds" data-i18n="config.proxyclean.probeInterval">探测间隔（秒）</label>
+                      <input id="c-pc-probe_interval_seconds" type="number" min="10" max="3600" step="1" value="300" required />
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-probe_timeout_seconds" data-i18n="config.proxyclean.probeTimeout">探测超时（秒）</label>
+                      <input id="c-pc-probe_timeout_seconds" type="number" min="1" max="30" step="1" value="8" required />
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-probe_concurrency" data-i18n="config.proxyclean.concurrency">探测并发数</label>
+                      <input id="c-pc-probe_concurrency" type="number" min="1" max="32" step="1" value="8" required />
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-max_candidates" data-i18n="config.proxyclean.candidates">最大候选节点数</label>
+                      <input id="c-pc-max_candidates" type="number" min="1" max="1000" step="1" value="100" required />
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-max_nodes" data-i18n="config.proxyclean.nodes">最大可用节点数（不超过候选数）</label>
+                      <input id="c-pc-max_nodes" type="number" min="1" max="100" step="1" value="20" required />
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-cooldown_seconds" data-i18n="config.proxyclean.cooldown">失败冷却（秒）</label>
+                      <input id="c-pc-cooldown_seconds" type="number" min="1" max="3600" step="1" value="60" required />
+                    </div>
+                    <div class="field full">
+                      <label class="check"><input id="c-pc-fallback" type="checkbox" /><span data-i18n="config.proxyclean.fallback">显式允许空池直连回退（默认关闭，会暴露服务器出口 IP）</span></label>
+                    </div>
+                  </div>
+                  <button id="proxyclean-status-refresh" type="button" class="btn btn-sm" data-i18n="config.proxyclean.refreshStatus">读取运行状态（仅 GET，不触发抓取）</button>
+                  <p id="proxyclean-status" class="section-caption" aria-live="polite" style="white-space: pre-line" data-i18n="config.proxyclean.statusHint">尚未读取运行状态；表单修改需保存后生效，状态读取不会覆盖未保存配置。</p>
+                </section>
               </div>
 
               <div data-panel="upstream" class="stack hidden" role="tabpanel">
@@ -869,7 +938,7 @@
                     <div>
                       <h2 class="section-title" data-i18n="config.upstream.title">上游与模型</h2>
                       <p class="section-caption" data-i18n="config.upstream.caption">
-                        anonymous 会耗尽可用 Proxy；显式 protocol 映射优先于模型名称推断。
+                        普通推理请求共享 HTTP 尝试总上限与总截止时间；显式 protocol 映射优先于模型名称推断。
                       </p>
                     </div>
                   </div>
@@ -890,12 +959,24 @@
                       <input id="c-up-go" />
                     </div>
                     <div class="field">
-                      <label for="c-attempts" data-i18n="config.upstream.attempts">每个 Key Tier 最大尝试次数</label>
+                      <label for="c-attempts" data-i18n="config.upstream.attempts">每个请求 HTTP 尝试总上限（含首次）</label>
                       <input id="c-attempts" type="number" />
                     </div>
                     <div class="field">
-                      <label for="c-timeout" data-i18n="config.upstream.timeout">请求超时（秒）</label>
+                      <label for="c-timeout" data-i18n="config.upstream.timeout">请求总截止时间（秒）</label>
                       <input id="c-timeout" type="number" />
+                    </div>
+                    <div class="field">
+                      <label for="c-backoff-initial" data-i18n="config.retry.backoffInitial">首轮退避（毫秒）</label>
+                      <input id="c-backoff-initial" type="number" min="0" max="86400000" step="1" value="0" required aria-describedby="retry-backoff-help" />
+                    </div>
+                    <div class="field">
+                      <label for="c-backoff-max" data-i18n="config.retry.backoffMax">最大退避（毫秒）</label>
+                      <input id="c-backoff-max" type="number" min="0" max="86400000" step="1" value="0" required aria-describedby="retry-backoff-help" />
+                    </div>
+                    <div class="field full">
+                      <p id="retry-backoff-help" class="section-caption" data-i18n="config.retry.backoffHelp">退避默认均为 0，范围为 0–86400000 毫秒。首轮为 0 关闭退避；首轮大于 0 且最大为 0 时，以首轮值作为固定上限；最大大于 0 时不得小于首轮。</p>
+                      <p class="section-caption" data-i18n="config.retry.policy">匿名 v1/v2、跨 Tier 与 stale-reasoning 重放共用尝试总上限（含首次 HTTP 尝试）和总截止时间。401/403 不通过换代理重试；429 遵循 Retry-After。</p>
                     </div>
                     <div class="field">
                       <label for="c-refresh" data-i18n="config.upstream.refresh">模型刷新（秒）</label>

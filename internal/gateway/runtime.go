@@ -166,6 +166,9 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 		return nil, err
 	}
 	gateway.rotation = m.rotation
+	if current := m.current.Load(); current != nil && gateway.publicPool != nil {
+		gateway.publicPool.inherit(current.gateway.publicPool)
+	}
 	availabilityPath := ""
 	if m.configPath != "" {
 		availabilityPath = m.configPath + "." + config.Fingerprint(cfg.Upstream.Zen) + ".availability.json"
@@ -195,6 +198,9 @@ func (m *RuntimeController) start(runtime *gatewayRuntime) {
 	// checks while in-flight HTTP requests continue on the old pools.
 	runtimeCtx, cancel := context.WithCancel(m.root)
 	runtime.cancel = cancel
+	if runtime.gateway.publicPool != nil {
+		go runtime.gateway.publicPool.run(runtimeCtx)
+	}
 	runtime.gateway.StartProxyHealthChecks(runtimeCtx)
 	runtime.gateway.StartModelRefresh(runtimeCtx)
 }
@@ -418,7 +424,7 @@ func (m *RuntimeController) Resources() ResourceSnapshot {
 	goBindings := append([]int(nil), gateway.goNodes.bindingCount...)
 	gateway.goNodes.bindingsMu.Unlock()
 	for _, proxy := range gateway.transports.items {
-		status := ProxyStatus{Index: proxy.index, Address: config.RedactURL(proxy.name), Healthy: proxy.healthy.Load(), Checking: proxy.checking.Load(), Anonymous: gateway.cfg.Anonymous}
+		status := ProxyStatus{Index: proxy.index, Address: config.RedactURL(proxy.name), Healthy: proxy.healthy.Load(), Checking: proxy.checking.Load(), Anonymous: gateway.cfg.Anonymous && !gateway.cfg.ProxyClean.Enabled}
 		if proxy.index < len(zenBindings) {
 			status.ZenKeys = zenBindings[proxy.index]
 		}

@@ -24,6 +24,7 @@ import (
 // RuntimeProxies returns, which is never saved. Prefer picks the keyed tier
 // that is tried first when both serve a model.
 type Config struct {
+	ProxyClean        ProxyCleanConfig             `json:"proxyclean"`
 	Rotation          RotationConfig               `json:"rotation"`
 	Listen            string                       `json:"listen"`
 	ServerKeys        []string                     `json:"server_keys"`
@@ -81,14 +82,19 @@ type UpstreamConfig struct {
 	Anonymous string `json:"anonymous"`
 }
 
-// RetryConfig bounds the upstream retries. MaxAttempts caps the attempts of a
-// retry loop: the keyed attempts of a client request outside the rotation
-// path, and the catalog refresh. For the anonymous lane it is instead a floor
-// for how many rotating proxies may be drawn. TimeoutSeconds is the deadline
-// of the whole client request, retries included.
+// RetryConfig bounds upstream attempts, including the initial call. Inference
+// requests share MaxAttempts across anonymous origins, key tiers and repair
+// replays (also across rotation models). This is a hard cap, not the historical
+// anonymous proxy-count floor. TimeoutSeconds covers the whole client request,
+// including backoff and response streaming.
 type RetryConfig struct {
 	MaxAttempts    int `json:"max_attempts"`
 	TimeoutSeconds int `json:"timeout_seconds"`
+	// BackoffInitialMS 0 preserves immediate retries. Otherwise delays double
+	// after each failed attempt, capped at BackoffMaxMS. A zero max uses the
+	// initial delay as the cap (fixed delay). Values are milliseconds.
+	BackoffInitialMS int `json:"backoff_initial_ms"`
+	BackoffMaxMS     int `json:"backoff_max_ms"`
 }
 
 // ModelsConfig controls model discovery and routing. RefreshSeconds is the
@@ -208,6 +214,10 @@ func Load(path string) (Config, error) {
 // either the JSON file or the authenticated management API. A relative
 // proxyfile is resolved against the directory of path.
 func Normalize(path string, cfg Config) (Config, error) {
+	cfg.ProxyClean.Defaults()
+	if err := cfg.ProxyClean.Validate(); err != nil {
+		return Config{}, err
+	}
 	cfg.Rotation.Defaults()
 	if err := cfg.Rotation.Validate(nil); err != nil {
 		return Config{}, err
@@ -253,6 +263,12 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Retry.TimeoutSeconds < 1 {
 		return Config{}, errors.New("retry.timeout_seconds must be at least 1")
+	}
+	if cfg.Retry.BackoffInitialMS < 0 || cfg.Retry.BackoffInitialMS > 86400000 || cfg.Retry.BackoffMaxMS < 0 || cfg.Retry.BackoffMaxMS > 86400000 {
+		return Config{}, errors.New("retry backoff values must be between 0 and 86400000 milliseconds")
+	}
+	if cfg.Retry.BackoffMaxMS > 0 && cfg.Retry.BackoffMaxMS < cfg.Retry.BackoffInitialMS {
+		return Config{}, errors.New("retry.backoff_max_ms must be zero or at least backoff_initial_ms")
 	}
 	if cfg.Models.RefreshSeconds < 1 {
 		return Config{}, errors.New("models.refresh_seconds must be at least 1")
@@ -418,6 +434,7 @@ func (cfg *Config) PasswordForSave() {
 // Clone returns a copy of cfg whose slices and maps, including the rotation
 // orders and the resolved proxy list, no longer share storage with cfg.
 func Clone(cfg Config) Config {
+	cfg.ProxyClean.Sources = append([]string(nil), cfg.ProxyClean.Sources...)
 	cfg.Rotation.SOTA.Order = append([]string(nil), cfg.Rotation.SOTA.Order...)
 	cfg.Rotation.Sweet.Order = append([]string(nil), cfg.Rotation.Sweet.Order...)
 	cfg.ServerKeys = append([]string(nil), cfg.ServerKeys...)
