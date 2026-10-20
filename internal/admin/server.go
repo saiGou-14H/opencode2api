@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -91,20 +90,13 @@ func (a *Server) Handler() http.Handler {
 // staticHandler serves the embedded WebUI assets, with the index fallback
 // described on Handler.
 func (a *Server) staticHandler() http.Handler {
-	assets := webui.Assets
-	files := http.FileServer(http.FS(assets))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			writeAdminError(w, http.StatusNotFound, "not_found", "management endpoint not found")
-			return
-		}
-		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
-			if _, err := fs.Stat(assets, strings.TrimPrefix(r.URL.Path, "/")); err != nil {
-				r.URL.Path = "/"
-			}
-		}
-		files.ServeHTTP(w, r)
-	})
+	handler, err := newAssetHandler(webui.Assets)
+	if err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "WebUI assets unavailable", http.StatusInternalServerError)
+		})
+	}
+	return handler
 }
 
 // securityHeaders sets the CSP and the other hardening headers the WebUI

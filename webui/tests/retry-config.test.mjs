@@ -118,6 +118,21 @@ const pcDefaults = {
   probe_timeout_seconds: 8, probe_concurrency: 8, max_candidates: 100,
   max_nodes: 20, cooldown_seconds: 60, allow_direct_fallback: false, required_exit_country: '',
 };
+for (const ids of [['proxifly-cn'], ['xyzs-cn'], ['monosans-cn'], ['proxifly-cn', 'xyzs-cn', 'monosans-cn']]) {
+  test(`CN-only checked sources ${ids.join(',')} save without global or custom sources`, async () => {
+    const h = harness(undefined, { ...pcDefaults, sources: ids, required_exit_country: 'CN', enabled: true });
+    for (const id of ids) {
+      assert.match(html, new RegExp(`id="c-pc-source-${id}"`));
+      assert.equal(h.$('#c-pc-source-' + id).checked, true);
+    }
+    await h.context.save({ preventDefault() {} });
+    assert.equal(h.notices.some(([message]) => /请至少选择/.test(message)), false);
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(h.calls[0].body.proxyclean.sources, ids);
+    assert.deepEqual(h.calls[0].body.proxyclean.custom_sources, []);
+  });
+}
+
 for (const country of [undefined, '', 'CN']) {
   test(`exit country roundtrip ${country ?? 'legacy missing'} preserves unrestricted default`, async () => {
     const h = harness(undefined, { ...pcDefaults, required_exit_country: country });
