@@ -289,6 +289,7 @@ const DICTIONARY = {
       "config.proxyclean.exitHelp": "Filters by the country of the exit IP echoed by a probe, not node names or source labels. In China-mainland-only mode, unknown and non-CN exits cannot route and direct fallback is forbidden; selecting CN turns fallback off. Geolocation does not establish model readiness or guarantee that every destination uses the same exit.",
       "config.proxyclean.invalidExitCountry": "Exit country filter must be unrestricted or China mainland (CN)",
       "config.proxyclean.exitFallbackInvalid": "China-mainland-only exits cannot use direct fallback; reselect the exit filter to turn fallback off before saving",
+      "pool.exitUnavailable": "No verified mainland-China exit (unknown country, non-CN exit or connection failure may be responsible; this does not mean all networks are down)",
       "pool.exitIP": "Probed exit IP",
       "pool.exitCountry": "Exit country code",
       "pool.exitCheckedAt": "Exit checked at",

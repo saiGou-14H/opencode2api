@@ -29,6 +29,14 @@ function fixture() {
   return { context, $, calls };
 }
 
+test('CN unavailable status explains unknown exits without claiming every network failed', async () => {
+  const h = fixture();
+  h.context.api = async (path) => path === '/api/proxyclean/nodes' ? { nodes: [], total: 0, operation: '' } : { source_status: 'empty', last_error: 'exit_country_unavailable', sources: [] };
+  await h.context.page.show();
+  assert.match(h.$('#pool-status').textContent, /无已验证的中国大陆出口/);
+  assert.match(h.$('#pool-status').textContent, /不代表全部网络故障/);
+});
+
 test('proxy-pool navigation is registered and has matching page and bilingual shell labels', () => {
   assert.match(shell, /import proxyPool from "\.\/pages\/proxy-pool.js"/);
   assert.match(shell, /const PAGES = \[[^\]]*proxyPool/);

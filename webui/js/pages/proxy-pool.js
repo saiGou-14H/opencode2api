@@ -28,6 +28,7 @@ function render() {
     t(`最近探活：${timestamp(status.last_probe_at)}；下次探活：${timestamp(status.next_probe_at)}；下次采集：${timestamp(status.next_refresh_at)}`, "pool.schedule", timestamp(status.last_probe_at), timestamp(status.next_probe_at), timestamp(status.next_refresh_at)),
     t(`任务：${task}；节点总数：${count(total)}`, "pool.operation", task, count(total)),
     t(`匿名通道受限直到：${timestamp(status.cooldown_until)}`, "pool.laneCooldown", timestamp(status.cooldown_until)),
+    status.last_error === "exit_country_unavailable" ? t("无已验证的中国大陆出口（可能是未知、非 CN 或连接失败；不代表全部网络故障）", "pool.exitUnavailable") : "",
   ].join("\n") : "—";
   syncButtons();
   const sources = $("#pool-sources");
@@ -122,6 +123,7 @@ async function perform(path, key, button, asynchronous = true) {
   } catch (error) {
     if (epoch !== sessionGeneration) return;
     const messages = {
+      exit_country_unavailable: ["无已验证的中国大陆出口（可能是未知、非 CN 或连接失败；不代表全部网络故障）", "pool.exitUnavailable"],
       proxyclean_busy: ["已有任务运行中，请稍后读取运行状态；未启动重复任务。", "pool.running"],
       proxyclean_disabled: ["代理池或匿名通道已关闭，请先在配置中心启用。", "pool.notEnabled"],
       proxyclean_unavailable: ["代理池暂不可用，请稍后重试。", "pool.unavailable"],

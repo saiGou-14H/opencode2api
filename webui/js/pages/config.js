@@ -232,7 +232,7 @@ function renderProxyCleanStatus() {
     : t("未知", "config.proxyclean.unknown");
   const count = (n) => Number.isSafeInteger(n) && n >= 0 ? n : "—";
   const timestamp = (s) => typeof s === "string" && Number.isFinite(Date.parse(s)) ? new Date(s).toISOString() : "—";
-  const errorCode = typeof value.last_error === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(value.last_error) ? value.last_error : "—";
+  const errorCode = value.last_error === "exit_country_unavailable" ? t("无已验证的中国大陆出口（可能是未知、非 CN 或连接失败；不代表全部网络故障）", "pool.exitUnavailable") : typeof value.last_error === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(value.last_error) ? value.last_error : "—";
   const enabled = value.enabled ? t("已启用", "config.proxyclean.on") : t("已关闭", "config.proxyclean.state.disabled");
   const scope = value.scope === "anonymous-only" ? value.scope : "—";
   // Only documented status fields are rendered as text, never HTML or raw errors.
