@@ -682,6 +682,7 @@ const DICTIONARY = {
       "toast.copied": "Copied",
       "toast.copyDenied": "The browser denied the copy; select the text and copy it manually",
       "toast.example.copied": "Example copied",
+      "config.savePoolReset": "Every successful save (even with no changes) clears old public-pool nodes and probe results. Automatic collection refetches and verifies candidates; with it off, the pool stays empty. Failed saves do not clear it. Disabled records and authorization/rate-limit cooldowns remain.",
       "toast.config.saved": "Configuration saved and already in effect",
       "toast.config.restart": "Applied; restart required for {0}",
       "toast.config.reloaded": "Configuration reloaded from disk",

@@ -164,7 +164,7 @@ func migrateAvailabilityPath(legacyPath, currentPath string) error {
 // the controller's rotation manager and pricing metadata, and keeps the
 // current runtime's availability registry while the Zen upstream is
 // unchanged; otherwise it uses the registry persisted for the new upstream.
-func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
+func (m *RuntimeController) build(cfg config.Config, resetPool ...bool) (*gatewayRuntime, error) {
 	gateway, err := New(cfg, m.logger, m.monitor)
 	if err != nil {
 		return nil, err
@@ -203,7 +203,7 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 			gateway.publicPool.fallback.blockedUntil = m.proxyCleanCooldown
 		}
 	}
-	if current := m.current.Load(); current != nil && gateway.publicPool != nil {
+	if current := m.current.Load(); current != nil && gateway.publicPool != nil && !(len(resetPool) > 0 && resetPool[0]) {
 		gateway.publicPool.inherit(current.gateway.publicPool)
 	}
 	availabilityPath := ""
@@ -298,7 +298,15 @@ func (m *RuntimeController) RestartStatus() (EffectiveListeners, []string) {
 func (m *RuntimeController) Apply(candidate config.Config, persist bool) (ApplyResult, error) {
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
-	return m.applyLocked(candidate, persist)
+	return m.applyLocked(candidate, persist, false)
+}
+
+// SaveConfig discards public-node snapshots only after a successful configuration save.
+// Controller-owned restrictions, disabled records and external-service budgets survive.
+func (m *RuntimeController) SaveConfig(candidate config.Config) (ApplyResult, error) {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
+	return m.applyLocked(candidate, true, true)
 }
 
 // Update serializes read-modify-write operations against the latest config.
@@ -317,7 +325,7 @@ func (m *RuntimeController) Update(change func(*config.Config) error) (ApplyResu
 // updateMu. Nothing changes until candidate has been normalized, built,
 // validated and, when required, saved. The new runtime inherits the current
 // catalog state and is started before it is swapped in.
-func (m *RuntimeController) applyLocked(candidate config.Config, persist bool) (ApplyResult, error) {
+func (m *RuntimeController) applyLocked(candidate config.Config, persist bool, resetPool ...bool) (ApplyResult, error) {
 
 	current := m.current.Load()
 	hadPlaintextPassword := candidate.WebUI.Password != ""
@@ -333,7 +341,7 @@ func (m *RuntimeController) applyLocked(candidate config.Config, persist bool) (
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	next, err := m.build(normalized)
+	next, err := m.build(normalized, resetPool...)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("initialize runtime: %w", err)
 	}

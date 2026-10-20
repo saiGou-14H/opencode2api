@@ -248,7 +248,7 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},
 	}
-	result, err := a.manager.Apply(candidate, true)
+	result, err := a.manager.SaveConfig(candidate)
 	if err != nil {
 		a.logger.Warn("configuration update rejected", "component", "config", "event", "config_rejected", "error", err)
 		writeAdminError(w, http.StatusBadRequest, "configuration_rejected", err.Error())
