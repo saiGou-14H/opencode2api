@@ -46,6 +46,17 @@ function secretInputs(name) {
 const numberValue = (selector) => Number($(selector).value);
 
 function retryInputs() {
+  const retriesRaw = $("#c-same-account-retries").value.trim();
+  const retries = Number(retriesRaw);
+  if (!retriesRaw || !Number.isInteger(retries) || retries < 0 || retries > 100) {
+    throw new Error(t("错误重试次数必须是 0–100 的整数", "config.retry.invalidRetries"));
+  }
+  const codesRaw = $("#c-same-account-status-codes").value.trim();
+  const tokens = codesRaw ? codesRaw.split(",").map((code) => code.trim()) : ["401", "403", "429"];
+  if (tokens.some((code) => !/^[0-9]+$/.test(code) || Number(code) < 100 || Number(code) > 599)) {
+    throw new Error(t("状态码须为英文逗号分隔的 100–599 十进制整数，不能有空项", "config.retry.invalidCodes"));
+  }
+  const codes = [...new Set(tokens.map(Number))].join(",");
   const readBackoff = (selector) => {
     const raw = $(selector).value.trim();
     const value = Number(raw);
@@ -64,6 +75,8 @@ function retryInputs() {
     timeout_seconds: numberValue("#c-timeout"),
     backoff_initial_ms: initial,
     backoff_max_ms: maximum,
+    same_account_retries: retries,
+    same_account_status_codes: codes,
   };
 }
 
@@ -79,14 +92,71 @@ const proxyCleanNumbers = {
   max_candidates: [100, 1, 1000],
   max_nodes: [20, 1, 100],
   cooldown_seconds: [60, 1, 3600],
+  min_healthy_nodes: [0, 0, 100],
+  refill_interval_seconds: [300, 30, 86400],
 };
+
+const customNodeProtocols = ["http", "https", "socks5", "socks5h"];
+let customSourceProtocols = new Map();
+const customSourceURLs = () => [...new Set($("#c-pc-custom-sources").value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
+const customProtocolFor = (url) => customSourceProtocols.get(url) ?? $("#c-pc-custom-protocol").value;
+
+function renderCustomProtocols() {
+  $("#c-pc-custom-protocol-preview").textContent = customSourceURLs().map((url, index) => {
+    const protocol = customProtocolFor(url);
+    const label = customNodeProtocols.includes(protocol) ? protocol.toUpperCase() : "—";
+    return t(`来源 ${index + 1}：${label}`, "config.proxyclean.protocolPreview", index + 1, label);
+  }).join("；");
+}
+
+function applyCustomProtocolToAll() {
+  const protocol = $("#c-pc-custom-protocol").value;
+  if (!customNodeProtocols.includes(protocol)) return;
+  customSourceProtocols = new Map(customSourceURLs().map((url) => [url, protocol]));
+  renderCustomProtocols();
+}
+
+function customSourceInputs() {
+  const values = customSourceURLs();
+  const invalid = () => new Error(t("自定义来源最多 10 条，须为公网 HTTPS URL，不含凭证、查询或片段，端口仅允许 443", "config.proxyclean.customInvalid"));
+  if (values.length > 10) throw invalid();
+  for (const value of values) {
+    let url;
+    try { url = new URL(value); } catch { throw invalid(); }
+    if (!/^https:\/\//i.test(value) || /[\s\\?#]/.test(value) || url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || value.slice(value.indexOf("://") + 3).split("/")[0].includes("@")) throw invalid();
+    const host = url.hostname.toLowerCase().replace(/\.$/, "");
+    if (host.startsWith("[")) {
+      // Only globally routable IPv6 candidates; DNS/network validation remains server-side.
+      if (!/^\[[23][0-9a-f]{3}:/.test(host) || host.startsWith("[2001:db8:")) throw invalid();
+    } else if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      const [a, b, c] = host.split(".").map(Number);
+      if (a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || b === 0 || (b === 88 && c === 99))) || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) || (a === 203 && b === 0 && c === 113)) throw invalid();
+    } else if (!host.includes(".") || /(?:^|\.)(localhost|local|internal|invalid|test)$/.test(host)) throw invalid();
+  }
+  return values.map((url) => {
+    const protocol = customProtocolFor(url);
+    if (!customNodeProtocols.includes(protocol)) {
+      throw new Error(t("节点默认协议仅支持 HTTP、HTTPS、SOCKS5、SOCKS5H", "config.proxyclean.invalidProtocol"));
+    }
+    return { url, default_protocol: protocol };
+  });
+}
 
 function fillProxyClean(value = {}) {
   $("#c-pc-enabled").checked = !!value.enabled;
   $("#c-pc-fallback").checked = !!value.allow_direct_fallback;
+  $("#c-pc-auto-switch").checked = value.auto_switch_proxy ?? true;
+  $("#c-pc-auto-collect").checked = value.auto_collect ?? true;
   $("#c-pc-scope").value = value.scope ?? "anonymous-only";
   $("#c-pc-source").value = value.source_url ?? proxyCleanSource;
-  const sources = Array.isArray(value.sources) && value.sources.length ? value.sources : ["proxyclean"];
+  customSourceProtocols = new Map((Array.isArray(value.custom_sources) ? value.custom_sources : []).map((entry) =>
+    typeof entry === "string" ? [entry, "socks5"] : [entry.url, entry.default_protocol],
+  ));
+  $("#c-pc-custom-sources").value = [...customSourceProtocols.keys()].join("\n");
+  $("#c-pc-custom-protocol").value = "socks5";
+  renderCustomProtocols();
+  const configuredSources = Array.isArray(value.sources) ? value.sources : [];
+  const sources = configuredSources.length || customSourceProtocols.size ? configuredSources : ["proxyclean"];
   for (const id of proxyCleanSourceIds) $("#c-pc-source-" + id).checked = sources.includes(id);
   for (const [key, [fallback]] of Object.entries(proxyCleanNumbers)) {
     $(`#c-pc-${key}`).value = value[key] ?? fallback;
@@ -95,15 +165,19 @@ function fillProxyClean(value = {}) {
 
 function proxyCleanInputs() {
   const sources = proxyCleanSourceIds.filter((id) => $("#c-pc-source-" + id).checked);
-  if (!sources.length) {
-    throw new Error(t("请至少选择一个 ProxyClean 来源", "config.proxyclean.sourcesRequired"));
+  const customSources = customSourceInputs();
+  if (!sources.length && !customSources.length) {
+    throw new Error(t("请至少选择一个内置来源或填写一个有效自定义来源", "config.proxyclean.sourcesRequired"));
   }
   const value = {
     sources,
+    custom_sources: customSources,
     enabled: $("#c-pc-enabled").checked,
     scope: "anonymous-only",
     source_url: proxyCleanSource,
     allow_direct_fallback: $("#c-pc-fallback").checked,
+    auto_switch_proxy: $("#c-pc-auto-switch").checked,
+    auto_collect: $("#c-pc-auto-collect").checked,
   };
   for (const [key, [, min, max]] of Object.entries(proxyCleanNumbers)) {
     const raw = $(`#c-pc-${key}`).value.trim();
@@ -118,6 +192,9 @@ function proxyCleanInputs() {
   }
   if (value.max_nodes > value.max_candidates) {
     throw new Error(t("ProxyClean 最大可用节点数不得超过候选数", "config.proxyclean.invalidNodes"));
+  }
+  if (value.min_healthy_nodes > value.max_nodes) {
+    throw new Error(t("低水位健康节点数不得超过最大节点数", "config.proxyclean.invalidLowWater"));
   }
   return value;
 }
@@ -144,14 +221,20 @@ function renderProxyCleanStatus() {
   // Only documented status fields are rendered as text, never HTML or raw errors.
   host.textContent = [
     t(`运行状态：${enabled} / ${status}；作用域：${scope}`, "config.proxyclean.statusSummary", enabled, status, scope),
-    t(`候选节点：${count(value.candidate_count)}；健康节点：${count(value.healthy_count)}`, "config.proxyclean.statusCounts", count(value.candidate_count), count(value.healthy_count)),
+    t(`候选节点：${count(value.candidate_count)}；可路由节点：${count(value.healthy_count)}`, "config.proxyclean.statusCounts", count(value.candidate_count), count(value.healthy_count)),
+    t(`节点总数：${count(value.total)}；传输健康：${count(value.healthy)}；冷却中：${count(value.cooling)}；已停用：${count(value.disabled)}`, "pool.counts", count(value.total), count(value.healthy), count(value.cooling), count(value.disabled)),
+    t(`最近探活：${timestamp(value.last_probe_at)}；下次探活：${timestamp(value.next_probe_at)}；下次采集：${timestamp(value.next_refresh_at)}`, "pool.schedule", timestamp(value.last_probe_at), timestamp(value.next_probe_at), timestamp(value.next_refresh_at)),
     t(`最近刷新：${timestamp(value.last_refresh_at)}；过期时间：${timestamp(value.expires_at)}`, "config.proxyclean.statusTimes", timestamp(value.last_refresh_at), timestamp(value.expires_at)),
     t(`最近错误（安全码）：${errorCode}`, "config.proxyclean.statusError", errorCode),
+    t(`匿名通道受限直到：${timestamp(value.cooldown_until)}`, "pool.laneCooldown", timestamp(value.cooldown_until)),
   ].join("\n");
   const sourceStates = { pending: "等待采集", ready: "可用", empty: "空源", error: "失败" };
   const seen = new Set();
   for (const source of Array.isArray(value.sources) ? value.sources : []) {
-    if (!source || !proxyCleanSourceIds.includes(source.id) || seen.has(source.id)) continue;
+    if (!source || typeof source.id !== "string" || seen.has(source.id)) continue;
+    const custom = /^custom-[0-9a-f]{16}$/.test(source.id);
+    if (!custom && !proxyCleanSourceIds.includes(source.id)) continue;
+    const name = custom ? t(`自定义来源 ${source.id.slice(7, 15)}`, "config.proxyclean.customName", source.id.slice(7, 15)) : source.id;
     seen.add(source.id);
     const state = Object.hasOwn(sourceStates, source.status)
       ? t(sourceStates[source.status], `config.proxyclean.sourceState.${source.status}`)
@@ -159,7 +242,7 @@ function renderProxyCleanStatus() {
     const code = typeof source.last_error === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(source.last_error) ? source.last_error : "—";
     const fetched = timestamp(source.last_fetch_at);
     const candidates = count(source.candidate_count);
-    host.textContent += "\n" + t(`${source.id}：${state}；候选：${candidates}；最近采集：${fetched}；安全码：${code}`, "config.proxyclean.sourceStatus", source.id, state, candidates, fetched, code);
+    host.textContent += "\n" + t(`${name}：${state}；候选：${candidates}；最近采集：${fetched}；安全码：${code}`, "config.proxyclean.sourceStatus", name, state, candidates, fetched, code);
   }
 }
 
@@ -194,6 +277,8 @@ function fillConfig(value) {
   $("#c-timeout").value = value.retry.timeout_seconds;
   $("#c-backoff-initial").value = value.retry.backoff_initial_ms ?? 0;
   $("#c-backoff-max").value = value.retry.backoff_max_ms ?? 0;
+  $("#c-same-account-retries").value = value.retry.same_account_retries ?? 0;
+  $("#c-same-account-status-codes").value = value.retry.same_account_status_codes ?? "401,403,429";
   $("#c-refresh").value = value.models.refresh_seconds;
   $("#c-protocols").value = JSON.stringify(value.models.protocols || {}, null, 2);
   $("#c-free-only").checked = !!value.models.free_only;
@@ -347,7 +432,11 @@ export default {
     $("#reload-config").addEventListener("click", reload);
     $("#reveal").addEventListener("click", reveal);
     $("#proxyclean-status-refresh").addEventListener("click", refreshProxyCleanStatus);
+    $("#c-pc-custom-sources").addEventListener("input", renderCustomProtocols);
+    $("#c-pc-custom-protocol").addEventListener("change", renderCustomProtocols);
+    $("#c-pc-custom-protocol-apply").addEventListener("click", applyCustomProtocolToAll);
     onChange(() => {
+      renderCustomProtocols();
       renderProxyCleanStatus();
       const value = store.get("config");
       if (value) renderRestartNotice(value);

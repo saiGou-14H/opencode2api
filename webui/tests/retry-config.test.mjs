@@ -29,7 +29,7 @@ function harness(retry = { max_attempts: 3, timeout_seconds: 60 }, proxyclean, s
   };
   const calls = [], notices = [];
   const context = vm.createContext({
-    $, $$: () => [], t: (original) => original,
+    $, URL, $$: () => [], t: (original) => original,
     store: { get: () => config, set() {} },
     api: async (url, options) => {
       calls.push({ url, method: options.method, body: options.body ? JSON.parse(options.body) : undefined });
@@ -56,14 +56,14 @@ for (const [initial, maximum] of [[0, 0], [200, 0], [200, 800], [0, 800], [86400
     await h.context.save({ preventDefault() {} });
     assert.equal(h.calls.length, 1);
     assert.equal(h.calls[0].url, '/api/config');
-    assert.deepEqual(h.calls[0].body.retry, retry);
+    assert.deepEqual(h.calls[0].body.retry, { ...retry, same_account_retries: 0, same_account_status_codes: '401,403,429' });
   });
 }
 
 test('old config defaults missing backoff fields to zero', async () => {
   const h = harness({ max_attempts: 3, timeout_seconds: 60 });
   await h.context.save({ preventDefault() {} });
-  assert.deepEqual(h.calls[0].body.retry, { max_attempts: 3, timeout_seconds: 60, backoff_initial_ms: 0, backoff_max_ms: 0 });
+  assert.deepEqual(h.calls[0].body.retry, { max_attempts: 3, timeout_seconds: 60, backoff_initial_ms: 0, backoff_max_ms: 0, same_account_retries: 0, same_account_status_codes: '401,403,429' });
 });
 
 for (const [initial, maximum] of [['-1', '0'], ['1.5', '0'], ['86400001', '0'], ['0', '86400001'], ['0', '-1'], ['0', '1.2'], ['', '0'], ['0', ''], ['NaN', '0'], ['Infinity', '0'], ['200', '100']]) {
@@ -108,6 +108,9 @@ test('Chinese fallback and English copy cover retry contract and validation', ()
 });
 
 const pcDefaults = {
+  min_healthy_nodes: 0, refill_interval_seconds: 300,
+  custom_sources: [],
+  auto_switch_proxy: true, auto_collect: true,
   sources: ['proxyclean'],
   enabled: false, scope: 'anonymous-only',
   source_url: 'https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt',
@@ -165,7 +168,186 @@ test('ProxyClean per-source status keeps successful sources visible when others 
   assert.equal(h.$('#c-pc-source-proxifly').checked, false);
 });
 
+test('ProxyClean automatic switches preserve explicit false through fill/save', async () => {
+  const h = harness(undefined, { ...pcDefaults, auto_switch_proxy: false, auto_collect: false });
+  assert.equal(h.$('#c-pc-auto-switch').checked, false);
+  assert.equal(h.$('#c-pc-auto-collect').checked, false);
+  await h.context.save({ preventDefault() {} });
+  assert.equal(h.calls[0].body.proxyclean.auto_switch_proxy, false);
+  assert.equal(h.calls[0].body.proxyclean.auto_collect, false);
+});
+
+for (const [raw, expected] of [['', '401,403,429'], ['   ', '401,403,429'], [' 401,403, 429,401 ', '401,403,429'], ['100,200,599', '100,200,599'], ['0401,401', '401']]) {
+  test(`same-account status code normalization: ${raw}`, async () => {
+    const h = harness({ max_attempts: 3, timeout_seconds: 60, same_account_retries: 100, same_account_status_codes: raw });
+    await h.context.save({ preventDefault() {} });
+    assert.equal(h.calls[0].body.retry.same_account_retries, 100);
+    assert.equal(h.calls[0].body.retry.same_account_status_codes, expected);
+  });
+}
+for (const raw of ['401,', ',401', '401,,403', '401, ,403', '99', '600', '-401', '4e2', '0x191', '401.0', 'abc', '401，403']) {
+  test(`same-account rejects invalid codes: ${raw}`, async () => {
+    const h = harness();
+    h.$('#c-same-account-status-codes').value = raw;
+    await h.context.save({ preventDefault() {} });
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.notices[0][1], true);
+  });
+}
+for (const raw of ['', '-1', '101', '1.5', 'NaN']) {
+  test(`same-account retry count rejects ${raw}`, async () => {
+    const h = harness();
+    h.$('#c-same-account-retries').value = raw;
+    await h.context.save({ preventDefault() {} });
+    assert.equal(h.calls.length, 0);
+  });
+}
+
+for (const sources of [[], undefined]) {
+  test(`custom-only object source preserves no built-ins (${sources ? 'empty' : 'omitted'})`, async () => {
+    const custom_sources = [{ url: 'https://example.org/list', default_protocol: 'http' }];
+    const h = harness(undefined, { ...pcDefaults, sources, custom_sources });
+    for (const id of sourceIds) assert.equal(h.$(`#c-pc-source-${id}`).checked, false);
+    await h.context.save({ preventDefault() {} });
+    assert.deepEqual(h.calls[0].body.proxyclean.sources, []);
+    assert.deepEqual(h.calls[0].body.proxyclean.custom_sources, custom_sources);
+  });
+}
+
+test('custom-only legacy strings default SOCKS5; deleting all sources blocks save', async () => {
+  const h = harness(undefined, { ...pcDefaults, sources: [], custom_sources: ['https://example.org/list'] });
+  await h.context.save({ preventDefault() {} });
+  assert.deepEqual(h.calls[0].body.proxyclean.sources, []);
+  assert.deepEqual(h.calls[0].body.proxyclean.custom_sources, [{ url: 'https://example.org/list', default_protocol: 'socks5' }]);
+  h.$('#c-pc-custom-sources').value = '';
+  await h.context.save({ preventDefault() {} });
+  assert.equal(h.calls.length, 1);
+  assert.match(h.notices.at(-1)[0], /内置来源.*有效自定义来源/);
+});
+
+test('invalid custom-only source never bypasses URL validation or silently enables built-in', async () => {
+  const h = harness(undefined, { ...pcDefaults, sources: [], custom_sources: ['http://example.org/list'] });
+  await h.context.save({ preventDefault() {} });
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.$('#c-pc-source-proxyclean').checked, false);
+});
+
+test('custom source URLs roundtrip unchanged; blank lines and duplicates are removed', async () => {
+  const urls = ['https://example.org/list.txt', 'https://example.net:443/SOCKS5.txt'];
+  const h = harness(undefined, { ...pcDefaults, custom_sources: urls });
+  assert.equal(h.$('#c-pc-custom-sources').value, urls.join('\n'));
+  h.$('#c-pc-custom-sources').value += `\n\n ${urls[0]} \n`;
+  await h.context.save({ preventDefault() {} });
+  assert.deepEqual(h.calls[0].body.proxyclean.custom_sources, urls.map((url) => ({ url, default_protocol: 'socks5' })));
+});
+
+test('custom object sources preserve four distinct node protocols despite HTTPS URL and selector changes', async () => {
+  const entries = ['http', 'https', 'socks5', 'socks5h'].map((default_protocol) => ({ url: `https://example.org/${default_protocol}.txt`, default_protocol }));
+  const h = harness(undefined, { ...pcDefaults, custom_sources: entries });
+  h.$('#c-pc-custom-protocol').value = 'http';
+  h.context.renderCustomProtocols();
+  assert.match(h.$('#c-pc-custom-protocol-preview').textContent, /来源 4：SOCKS5H/);
+  await h.context.save({ preventDefault() {} });
+  assert.deepEqual(h.calls[0].body.proxyclean.custom_sources, entries);
+});
+
+test('new URLs use chosen node protocol without altering existing sources; explicit apply-all changes all', async () => {
+  const first = { url: 'https://example.org/first.txt', default_protocol: 'socks5h' };
+  const h = harness(undefined, { ...pcDefaults, custom_sources: [first] });
+  h.$('#c-pc-custom-sources').value += '\nhttps://example.org/new.txt';
+  h.$('#c-pc-custom-protocol').value = 'http';
+  await h.context.save({ preventDefault() {} });
+  assert.deepEqual(h.calls[0].body.proxyclean.custom_sources, [first, { url: 'https://example.org/new.txt', default_protocol: 'http' }]);
+  h.$('#c-pc-custom-protocol').value = 'https';
+  h.context.applyCustomProtocolToAll();
+  await h.context.save({ preventDefault() {} });
+  assert.deepEqual(h.calls[1].body.proxyclean.custom_sources.map((entry) => entry.default_protocol), ['https', 'https']);
+});
+
+test('custom source URL reorder and deletion preserve association, not line-position protocol', async () => {
+  const entries = [{ url: 'https://example.org/a', default_protocol: 'http' }, { url: 'https://example.org/b', default_protocol: 'socks5h' }];
+  const h = harness(undefined, { ...pcDefaults, custom_sources: entries });
+  h.$('#c-pc-custom-sources').value = entries[1].url + '\n' + entries[0].url;
+  await h.context.save({ preventDefault() {} });
+  assert.deepEqual(h.calls[0].body.proxyclean.custom_sources, [...entries].reverse());
+  h.$('#c-pc-custom-sources').value = entries[1].url;
+  await h.context.save({ preventDefault() {} });
+  assert.deepEqual(h.calls[1].body.proxyclean.custom_sources, [entries[1]]);
+});
+
+test('unsupported node defaults are rejected and dropdown exposes only the four protocols', async () => {
+  const h = harness();
+  h.$('#c-pc-custom-sources').value = 'https://example.org/list';
+  h.$('#c-pc-custom-protocol').value = 'socks4';
+  await h.context.save({ preventDefault() {} });
+  assert.equal(h.calls.length, 0);
+  assert.match(h.notices[0][0], /HTTP.*HTTPS.*SOCKS5.*SOCKS5H/);
+  const select = html.match(/<select id="c-pc-custom-protocol">([\s\S]*?)<\/select>/)[1];
+  assert.deepEqual([...select.matchAll(/value="([^"]+)"/g)].map((match) => match[1]), ['http', 'https', 'socks5', 'socks5h']);
+});
+
+test('custom source limit permits 10 unique URLs but rejects 11', async () => {
+  const h = harness();
+  const urls = Array.from({ length: 11 }, (_, i) => `https://example.org/${i}.txt`);
+  h.$('#c-pc-custom-sources').value = urls.join('\n');
+  await h.context.save({ preventDefault() {} });
+  assert.equal(h.calls.length, 0);
+  h.$('#c-pc-custom-sources').value = urls.slice(0, 10).join('\n');
+  await h.context.save({ preventDefault() {} });
+  assert.equal(h.calls[0].body.proxyclean.custom_sources.length, 10);
+});
+
+for (const url of ['http://example.org/list', 'https://user:pass@example.org/list', 'https://@example.org/list', 'https://example.org/list?key=x', 'https://example.org/list?', 'https://example.org/list#', 'https://example.org:444/list', 'https://localhost/list', 'https://foo.local/list', 'https://127.1/list', 'https://10.0.0.1/list', 'https://169.254.169.254/list', 'https://172.16.1.1/list', 'https://192.168.1.1/list', 'https://[::1]/list', 'https://[fd00::1]/list', 'https://[fe80::1]/list', 'not a URL']) {
+  test(`custom URL validation rejects invalid or private fixture ${url}`, async () => {
+    const h = harness();
+    h.$('#c-pc-custom-sources').value = url;
+    await h.context.save({ preventDefault() {} });
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.notices[0][1], true);
+    assert.ok(!h.notices[0][0].includes(url));
+  });
+}
+
+test('config status accepts exact custom fingerprint only and never displays source URL', async () => {
+  const h = harness(undefined, undefined, { sources: [
+    { id: 'custom-0123456789abcdef', status: 'ready', candidate_count: 5, url: 'DO_NOT_DISPLAY' },
+    { id: 'custom-wrong', status: 'ready' }, { id: 'unknown', status: 'ready' },
+  ] });
+  await h.context.refreshProxyCleanStatus();
+  const text = h.$('#proxyclean-status').textContent;
+  assert.match(text, /自定义来源 01234567/);
+  assert.doesNotMatch(text, /DO_NOT_DISPLAY|custom-wrong|unknown/);
+});
+
+for (const [minimum, maximum, interval] of [[0, 20, 300], [5, 20, 30], [20, 20, 86400]]) {
+  test(`low-water config roundtrips ${minimum}/${maximum}/${interval} with auto collection disabled`, async () => {
+    const h = harness(undefined, { ...pcDefaults, min_healthy_nodes: minimum, max_nodes: maximum, refill_interval_seconds: interval, auto_collect: false });
+    await h.context.save({ preventDefault() {} });
+    assert.equal(h.calls[0].body.proxyclean.min_healthy_nodes, minimum);
+    assert.equal(h.calls[0].body.proxyclean.refill_interval_seconds, interval);
+    assert.equal(h.calls[0].body.proxyclean.auto_collect, false);
+  });
+}
+
+test('low-water minimum cannot exceed current max nodes', async () => {
+  const h = harness(undefined, { ...pcDefaults, min_healthy_nodes: 21 });
+  await h.context.save({ preventDefault() {} });
+  assert.equal(h.calls.length, 0);
+  assert.match(h.notices[0][0], /低水位.*最大节点数/);
+});
+
+test('config status distinguishes transport-healthy from zero routable during lane restriction', async () => {
+  const h = harness(undefined, undefined, { source_status: 'ready', candidate_count: 10, healthy_count: 0, total: 10, healthy: 5, cooling: 3, disabled: 2, last_probe_at: '2026-01-01T00:00:00Z', next_probe_at: '2026-01-01T00:05:00Z', next_refresh_at: '2026-01-01T01:00:00Z' });
+  await h.context.refreshProxyCleanStatus();
+  const text = h.$('#proxyclean-status').textContent;
+  assert.match(text, /可路由节点：0/);
+  assert.match(text, /节点总数：10；传输健康：5；冷却中：3；已停用：2/);
+  assert.match(text, /下次探活：2026-01-01T00:05:00.000Z/);
+  assert.match(text, /下次采集：2026-01-01T01:00:00.000Z/);
+});
+
 const pcBounds = {
+  min_healthy_nodes: [0, 100], refill_interval_seconds: [30, 86400],
   refresh_seconds: [30, 86400], ttl_seconds: [30, 172800],
   probe_interval_seconds: [10, 3600], probe_timeout_seconds: [1, 30],
   probe_concurrency: [1, 32], max_candidates: [1, 1000],
@@ -271,7 +453,7 @@ test('ProxyClean status handles null response and untrusted optional fields safe
   await h.context.refreshProxyCleanStatus();
   const text = h.$('#proxyclean-status').textContent;
   assert.match(text, /未知/);
-  assert.match(text, /候选节点：—；健康节点：—/);
+  assert.match(text, /候选节点：—；可路由节点：—/);
   assert.match(text, /最近刷新：—；过期时间：—/);
   assert.doesNotMatch(text, /<script>|<img|invalid|bad/);
 });
@@ -306,6 +488,6 @@ test('ProxyClean Chinese/English UI covers all fields, safety and translated sta
   h.context.t = (original, key, ...args) => (en[key] || original).replace(/\{(\d+)\}/g, (_, i) => args[i]);
   return h.context.refreshProxyCleanStatus().then(() => {
     assert.match(h.$('#proxyclean-status').textContent, /Runtime: Enabled \/ Ready; scope: anonymous-only/);
-    assert.match(h.$('#proxyclean-status').textContent, /Candidates: 5; healthy: 2/);
+    assert.match(h.$('#proxyclean-status').textContent, /Candidates: 5; routable: 2/);
   });
 });

@@ -36,7 +36,10 @@ export async function api(path, options = {}) {
       if (onUnauthorized) onUnauthorized();
       throw new Error(t("登录已失效", "error.session"));
     }
-    throw new Error(data.error?.message || `HTTP ${response.status}`);
+    const error = new Error(data.error?.message || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = typeof data.error?.code === "string" ? data.error.code : "";
+    throw error;
   }
   return data;
 }

@@ -14,8 +14,9 @@ import quotas from "./pages/model-quotas.js";
 import rotation from "./pages/rotation.js";
 import configPage from "./pages/config.js";
 import account from "./pages/account.js";
+import proxyPool from "./pages/proxy-pool.js";
 
-const PAGES = [overview, diagnostics, access, apiKeys, quotas, rotation, configPage, account];
+const PAGES = [overview, diagnostics, access, apiKeys, quotas, rotation, configPage, proxyPool, account];
 const byId = new Map(PAGES.map((page) => [page.id, page]));
 
 // Hrefs from the previous 13-page layout keep working.

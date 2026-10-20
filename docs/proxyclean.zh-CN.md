@@ -4,7 +4,7 @@
 
 ## 自动采集来源
 
-`proxyclean.sources` 选择需要采集的来源，管理界面支持独立勾选。兼容旧配置时，省略或空数组使用 `["proxyclean"]`；未知或重复 ID 被拒绝。
+`proxyclean.sources` 选择需要采集的内置来源，管理界面支持独立勾选。兼容旧配置时，仅在内置和自定义来源同时为空时使用 `["proxyclean"]`；内置未知或重复 ID 被拒绝。
 
 | ID | 数据仓库 |
 |---|---|
@@ -26,15 +26,37 @@
 
 上述仅为字段片段，合并进现有配置而非覆盖全配置。`source_url` 是保留的旧版官方地址字段；实际采集由 `sources` 的固定适配器决定，不能填写任意 URL。
 
+## 自定义来源与多协议
+
+管理页面支持添加最多 10 个自定义 HTTPS 文本来源；可与内置源并用，也可只选择自定义源。来源必须是公网 HTTPS URL（443端口），不接受账号密码、query、fragment、回环/内网地址；抓取时继续验证 DNS 所有结果并固定拨号，禁止重定向和环境代理。自定义源每个限 4 MiB、25 秒，失败独立显示安全错误码。
+
+```json
+{
+  "proxyclean": {
+    "sources": [],
+    "custom_sources": [
+      {"url":"https://example.com/proxies.txt","default_protocol":"http"}
+    ]
+  }
+}
+```
+
+`example.com` 仅是格式示例，不是提供给你的真实代理源。兼容旧版自定义字符串 URL，默认协议为 `socks5`。
+
+自定义列表支持 `http://IP:port`、`https://IP:port`、`socks5://IP:port`、`socks5h://IP:port` 混合条目；裸 `IP:port` 使用该来源的 `default_protocol`。仅接纳公网 literal IP，当前不接纳域名节点、带凭据节点、SOCKS4、Clash/V2Ray 订阅或递归来源链接。HTTPS **来源 URL** 与节点 **代理协议** 是不同概念。
+
+去重键包含协议，因此同IP端口的 HTTP 与 SOCKS5 不会合并。内置源仍按其声明的 SOCKS5 解析，防止把不明混合内容错误识别为代理。HTTP代理使用CONNECT承载目标HTTPS，HTTPS代理还验证代理端TLS；两种客户端均不能关闭证书校验。
+
 ## 安全与启用边界
 
 - 默认 `proxyclean.enabled=false`；管理员需明确开启。
 - `scope` 固定为 `anonymous-only`：公共池仅用于匿名免费模型，付费 Zen/Go Key、管理请求和模型目录请求保持原有线路。
 - 公共代理并不可信，即使探活成功也不代表长期稳定。HTTPS 保留端到端证书链与主机名验证，不安装代理 CA、不关闭 TLS 校验。代理仍能观察连接目标和流量元数据。
-- 来源限定白名单内的官方 HTTPS 列表；只接受经过解析、去重、公网 IP 检查和本机探活的 SOCKS5 节点。私网、回环、链路本地等节点不会进入池。
+- 来源为内置官方 HTTPS 列表或管理员配置的合规公网 HTTPS 文本 URL；只接受经过解析、去重、公网 IP 检查和本机探活的节点。私网、回环、链路本地等节点不会进入池。
+- 来源429/503的 `Retry-After` 也会遵守；热更新和全局开关切换不清除尚未过期的来源冷却。冷却状态是进程内状态，整个服务重启并不持久保留它。HTTP代理CONNECT协商头限64KiB，成功后的隧道流量不受该头部预算限制。
 - 来源刷新、探活和池状态管理是本机职责；ProxyClean 的原始探活通过不等于本机能访问模型上游。
 - 默认空池/过期池不偷偷直连。只有显式开启 `allow_direct_fallback` 才允许该回退；不要误将无健康节点显示为正常运行。
-- 代理故障切换不用于绕过授权或风控：401/403/429 立即结束当前请求，不通过更换 IP 重放。429 原样回传 `Retry-After`；公共匿名通道随后进入共享冷却，至少等待 `cooldown_seconds`，更长的 `Retry-After` 完整保留，主页探活或来源刷新不能清除此限制。状态含 `cooldown_until` 与 `upstream_restricted`。
+- 代理故障切换不用于绕过授权或风控：401/403/429 可以按管理员配置在**同账号、同代理、同 origin**有限原地重试，耗尽后结束请求，不通过更换 IP 或 Key 继续。429 等待完整 `Retry-After`（总 deadline 仍可提前结束），最终保留该响应头。公共匿名通道随后进入共享冷却，至少等待 `cooldown_seconds`，更长的 `Retry-After` 完整保留；主页探活、来源刷新或开关热更新不能清除此限制。状态含 `cooldown_until` 与 `upstream_restricted`。
 - 开启公共池后，匿名请求失败不会自动转入付费 Key 通道；直接请求付费模型仍走原有线路。
 - 请求开始输出后不会因流式中断自动换代理重放，避免重复内容与不确定的重复计费。
 
@@ -46,7 +68,12 @@
 |---|---:|---|
 | `proxyclean.enabled` | false | 是否启用匿名代理池 |
 | `proxyclean.scope` | anonymous-only | 固定匿名范围 |
-| `proxyclean.sources` | ["proxyclean"] | 选择七个固定来源中的一个或多个 |
+| `proxyclean.sources` | ["proxyclean"] | 选择七个固定来源中的一个或多个；可仅使用custom_sources |
+| `proxyclean.custom_sources` | [] | 最多10个{url,default_protocol}自定义公网HTTPS文本来源 |
+| `proxyclean.auto_switch_proxy` | true（省略） | 匿名公共池故障是否切换到其他代理；不改变付费Key线路 |
+| `proxyclean.auto_collect` | true（省略） | 是否启动/定时自动采集；false时仍允许管理员手动采集 |
+| `proxyclean.min_healthy_nodes` | 0 | 低水位补池阈值，0关闭，范围0..max_nodes；生产可设5 |
+| `proxyclean.refill_interval_seconds` | 300 | 补池尝试最小间隔，30..86400秒；失败也计入间隔 |
 | `proxyclean.source_url` | 官方 SOCKS5.txt | 保留旧版兼容字段，来源选择由 sources 决定 |
 | `proxyclean.refresh_seconds` | 3600 | 刷新候选列表间隔 |
 | `proxyclean.ttl_seconds` | 7200 | 本地列表最长可用年龄，不是上游有效性担保 |
@@ -58,11 +85,30 @@
 | `proxyclean.cooldown_seconds` | 60 | 故障节点冷却 |
 | `proxyclean.allow_direct_fallback` | false | 空池是否允许明确直连回退 |
 | `retry.max_attempts` | 3 | 一次请求的 HTTP 尝试硬上限，含首次调用 |
+| `retry.same_account_retries` | 0 | 首次外同账号/同代理追加次数，0..100，仍受max_attempts总上限约束 |
+| `retry.same_account_status_codes` | 空（401,403,429） | 英文逗号分隔100..599整数；网络错误也会原地重试 |
 | `retry.timeout_seconds` | 300 | 请求总时限，包含退避等待和所有尝试 |
 | `retry.backoff_initial_ms` | 0 | 初始退避；0 关闭退避 |
 | `retry.backoff_max_ms` | 0 | 退避上限；初始值>0且本值=0时固定使用初始值 |
 
 建议先保留既有总时限，设置有限次数与适度退避，再根据真实日志调整；不要用无限重试或更换代理来处理权限拒绝。达到请求 deadline 或客户端取消时应立即停止等待。
+
+## 代理池管理菜单
+
+独立“代理池管理”菜单提供来源状态、节点协议/endpoint、健康与停用状态、冷却与探活时间，以及手动采集、探活、停用、恢复。动作走既有管理会话及 CSRF，不新增公网管理端口。
+
+| API | 语义 |
+|---|---|
+| `GET /api/proxyclean` | 池、来源及匿名通道冷却状态 |
+| `GET /api/proxyclean/nodes` | 有界节点列表与当前任务 |
+| `POST /api/proxyclean/refresh` | 异步采集；202仅表示受理，随后刷新状态查看结果 |
+| `POST /api/proxyclean/probe` | 异步探活，与采集共用单飞；运行中返回409 |
+| `POST /api/proxyclean/nodes/{id}/disable` | 持久停用，定时探活和来源刷新不会自动恢复 |
+| `POST /api/proxyclean/nodes/{id}/enable` | 恢复调度资格；不会清除整个匿名通道的权限/限流冷却 |
+
+停用ID存储于配置文件同目录的 `proxyclean-disabled.json`，权限0600并原子写入；生产路径为 `/var/lib/opencode2api/proxyclean-disabled.json`，由既有Docker状态卷持久化。写盘失败时不假装停用成功。关闭自动采集仍允许手动采集；关闭全局代理池后拒绝运维网络任务。
+
+同账号追加重试的实际调用次数不会超过 `max_attempts` 的剩余预算。例如总上限3、追加次数2，至多3次HTTP调用，而不是3×3次。配置2xx状态码会重新发送尚未向客户端输出的成功请求，可能重复计费；通常不应这样配置。已开始SSE输出后绝不重放。
 
 ## 状态与排障
 

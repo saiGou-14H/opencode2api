@@ -59,6 +59,7 @@
           </div>
           <div class="nav-group">
             <div class="nav-group-title" data-i18n="nav.group.system">系统</div>
+            <button class="nav-item" data-page="proxy-pool" data-i18n="nav.proxy-pool">代理池管理</button>
             <button class="nav-item" data-page="config" data-i18n="nav.config">配置中心</button>
             <button class="nav-item" data-page="account" data-i18n="nav.account">账号安全</button>
           </div>
@@ -89,6 +90,28 @@
 
         <main id="main">
           <div id="restart-notice" class="notice hidden" role="status"></div>
+
+          <section id="page-proxy-pool" class="page hidden">
+            <section class="section stack">
+              <p class="section-caption" data-i18n="pool.hint">仅管理匿名公共代理池，付费 Key 原线路不变。采集和探活是异步任务：请求受理不代表完成，请读取状态确认。来源选择和自动开关在配置中心保存。</p>
+              <p class="notice" data-i18n="pool.connectivityWarning">代理 HTTPS 连通 ≠ 模型可用。节点探活仅反映传输连通性；上游 restricted / 限流属于通道受限，不等同于代理传输故障。请分别查看节点探活结果与匿名通道受限截止时间。</p>
+              <p class="section-caption" data-i18n="pool.healthMeaning">传输健康计数仅含未禁用、未冷却的健康节点，不因上游通道受限而归零；可路由计数还受通道权限和限流约束。低水位补池不会绕过这些限制，关闭自动采集也会关闭低水位触发。</p>
+              <div class="actions">
+                <button id="pool-refresh-status" type="button" class="btn" data-i18n="config.proxyclean.refreshStatus">读取运行状态（仅 GET，不触发抓取）</button>
+                <button id="pool-collect" type="button" class="btn" data-i18n="pool.collect">采集来源</button>
+                <button id="pool-probe" type="button" class="btn" data-i18n="pool.probe">探活节点</button>
+              </div>
+              <p id="pool-message" role="status" aria-live="polite"></p>
+              <p id="pool-status" class="section-caption" style="white-space: pre-line"></p>
+              <h2 class="section-title" data-i18n="pool.sources">采集来源状态</h2>
+              <div id="pool-sources" class="stack"></div>
+              <h2 class="section-title" data-i18n="pool.nodes">节点</h2>
+              <div class="table-wrap"><table class="table">
+                <thead><tr><th data-i18n="pool.node">节点 ID</th><th data-i18n="pool.endpoint">节点端点</th><th data-i18n="pool.health">健康状态</th><th data-i18n="pool.nodeCooldown">节点冷却截止</th><th data-i18n="pool.lastProbe">最近探活时间 / 结果</th><th data-i18n="pool.protocol">代理协议</th><th data-i18n="pool.latency">探活延迟（毫秒）</th><th data-i18n="pool.failures">连续失败次数</th><th data-i18n="pool.action">操作</th></tr></thead>
+                <tbody id="pool-nodes"></tbody>
+              </table></div>
+            </section>
+          </section>
 
           <section id="page-overview" class="page">
             <div class="tabs" role="tablist" aria-label="概览视图">
@@ -871,6 +894,8 @@
                   <div class="form-grid">
                     <div class="field full">
                       <label class="check"><input id="c-pc-enabled" type="checkbox" /><span data-i18n="config.proxyclean.enabled">启用 ProxyClean（默认关闭，仅匿名通道）</span></label>
+                      <label class="check"><input id="c-pc-auto-switch" type="checkbox" checked /><span data-i18n="config.proxyclean.autoSwitch">自动切换代理（默认开启；关闭后不自动换节点）</span></label>
+                      <label class="check"><input id="c-pc-auto-collect" type="checkbox" checked /><span data-i18n="config.proxyclean.autoCollect">自动采集（默认开启；关闭后可在代理池管理中手动采集）</span></label>
                     </div>
                     <div class="field">
                       <label for="c-pc-scope" data-i18n="config.proxyclean.scope">作用域（固定）</label>
@@ -881,7 +906,7 @@
                       <input id="c-pc-source" value="https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt" readonly />
                     </div>
                     <fieldset class="field full" aria-describedby="proxyclean-sources-help">
-                      <legend data-i18n="config.proxyclean.sources">采集来源（至少选择一项）</legend>
+                      <legend data-i18n="config.proxyclean.sources">内置采集来源（可仅使用下方自定义来源）</legend>
                       <label class="check"><input id="c-pc-source-proxyclean" type="checkbox" checked />ProxyClean (proxyclean)</label>
                       <label class="check"><input id="c-pc-source-proxifly" type="checkbox" />Proxifly (proxifly)</label>
                       <label class="check"><input id="c-pc-source-thespeedx" type="checkbox" />TheSpeedX (thespeedx)</label>
@@ -889,8 +914,17 @@
                       <label class="check"><input id="c-pc-source-hookzof" type="checkbox" />Hookzof (hookzof)</label>
                       <label class="check"><input id="c-pc-source-gfpcom" type="checkbox" />GFPCom (gfpcom)</label>
                       <label class="check"><input id="c-pc-source-dpangestuw" type="checkbox" />dpangestuw</label>
-                      <p id="proxyclean-sources-help" class="section-caption" data-i18n="config.proxyclean.sourcesHelp">选中的来源列表生效；上方 source_url 仅为旧版兼容字段，不覆盖来源选择。旧配置省略或空来源列表默认使用 proxyclean。单源失败不阻断其他来源；候选节点从各源轮询公平合并并去重。公共池默认仍关闭。</p>
+                      <p id="proxyclean-sources-help" class="section-caption" data-i18n="config.proxyclean.sourcesHelp">选中的来源列表生效；上方 source_url 仅为旧版兼容字段，不覆盖来源选择。允许只用自定义来源；保存时至少有一个内置或有效自定义来源。仅在加载旧配置时内置和自定义都为空才默认回填 proxyclean。单源失败不阻断其他来源；候选节点从各源轮询公平合并并去重。公共池默认仍关闭。</p>
                     </fieldset>
+                    <div class="field full">
+                      <label for="c-pc-custom-sources" data-i18n="config.proxyclean.customSources">自定义来源 URL（每行一条，最多 10 条）</label>
+                      <textarea id="c-pc-custom-sources" spellcheck="false" aria-describedby="proxyclean-custom-help"></textarea>
+                      <label for="c-pc-custom-protocol" data-i18n="config.proxyclean.customProtocol">新来源的裸节点默认协议（不是来源 URL 协议）</label>
+                      <select id="c-pc-custom-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5" selected>SOCKS5</option><option value="socks5h">SOCKS5H</option></select>
+                      <button id="c-pc-custom-protocol-apply" type="button" class="btn btn-sm" data-i18n="config.proxyclean.protocolApply">将所选默认协议应用于全部来源</button>
+                      <p id="c-pc-custom-protocol-preview" class="section-caption" aria-live="polite"></p>
+                      <p id="proxyclean-custom-help" class="section-caption" data-i18n="config.proxyclean.customHelp">来源 URL 仅允许公网 HTTPS，不含凭证、查询或片段，端口为空或 443；它不决定代理协议。裸 IP:port 节点采用各来源默认协议，带前缀的混合节点按 HTTP/HTTPS/SOCKS5/SOCKS5H 自身协议，不支持 SOCKS4、订阅或递归清单。已有来源各自协议会保留；下拉框仅影响新增 URL，点统一应用按钮才修改全部。旧字符串来源默认为 SOCKS5。保存去空行、去重；留空仅用内置源。抓取受全局启用和自动采集开关控制，公网地址由后端验证。</p>
+                    </div>
                     <div class="field">
                       <label for="c-pc-refresh_seconds" data-i18n="config.proxyclean.refresh">来源刷新间隔（秒）</label>
                       <input id="c-pc-refresh_seconds" type="number" min="30" max="86400" step="1" value="3600" required />
@@ -923,6 +957,15 @@
                       <label for="c-pc-cooldown_seconds" data-i18n="config.proxyclean.cooldown">失败冷却（秒）</label>
                       <input id="c-pc-cooldown_seconds" type="number" min="1" max="3600" step="1" value="60" required />
                     </div>
+                    <div class="field">
+                      <label for="c-pc-min_healthy_nodes" data-i18n="config.proxyclean.lowWater">健康节点低水位（0 关闭，不超过最大节点数）</label>
+                      <input id="c-pc-min_healthy_nodes" type="number" min="0" max="100" step="1" value="0" required aria-describedby="proxyclean-refill-help" />
+                    </div>
+                    <div class="field">
+                      <label for="c-pc-refill_interval_seconds" data-i18n="config.proxyclean.refillInterval">低水位补池间隔（秒）</label>
+                      <input id="c-pc-refill_interval_seconds" type="number" min="30" max="86400" step="1" value="300" required aria-describedby="proxyclean-refill-help" />
+                    </div>
+                    <p id="proxyclean-refill-help" class="field full section-caption" data-i18n="config.proxyclean.refillHelp">低水位默认 0 关闭，补池间隔默认 300 秒。关闭自动采集后不会触发低水位补池；通道权限或限流冷却不会通过补池绕过。定时探活仍使用上方探测间隔、超时与并发设置。</p>
                     <div class="field full">
                       <label class="check"><input id="c-pc-fallback" type="checkbox" /><span data-i18n="config.proxyclean.fallback">显式允许空池直连回退（默认关闭，会暴露服务器出口 IP）</span></label>
                     </div>
@@ -974,6 +1017,15 @@
                       <label for="c-backoff-max" data-i18n="config.retry.backoffMax">最大退避（毫秒）</label>
                       <input id="c-backoff-max" type="number" min="0" max="86400000" step="1" value="0" required aria-describedby="retry-backoff-help" />
                     </div>
+                    <div class="field">
+                      <label for="c-same-account-retries" data-i18n="config.retry.sameAccountRetries">错误重试次数（同账号，首次之外追加）</label>
+                      <input id="c-same-account-retries" type="number" min="0" max="100" step="1" value="0" required aria-describedby="retry-same-account-help" />
+                    </div>
+                    <div class="field">
+                      <label for="c-same-account-status-codes" data-i18n="config.retry.sameAccountCodes">同账号重试状态码</label>
+                      <input id="c-same-account-status-codes" value="401,403,429" aria-describedby="retry-same-account-help" />
+                    </div>
+                    <p id="retry-same-account-help" class="field full section-caption" data-i18n="config.retry.sameAccountHelp">默认追加 0 次；仍受整个请求 max_attempts 硬上限约束。同账号、同代理重试，不通过换 IP 绕过 401/403/429。状态码用英文逗号分隔，允许 100–599；空白默认 401,403,429。警告：选择 2xx 会重试已成功请求，可能重复计费。</p>
                     <div class="field full">
                       <p id="retry-backoff-help" class="section-caption" data-i18n="config.retry.backoffHelp">退避默认均为 0，范围为 0–86400000 毫秒。首轮为 0 关闭退避；首轮大于 0 且最大为 0 时，以首轮值作为固定上限；最大大于 0 时不得小于首轮。</p>
                       <p class="section-caption" data-i18n="config.retry.policy">匿名 v1/v2、跨 Tier 与 stale-reasoning 重放共用尝试总上限（含首次 HTTP 尝试）和总截止时间。401/403 不通过换代理重试；429 遵循 Retry-After。</p>
