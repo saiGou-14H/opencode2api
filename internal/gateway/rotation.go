@@ -78,15 +78,17 @@ type groupAttempt struct {
 	quota, committed bool
 	pause            time.Duration
 	reason           string
+	used             int
 }
 
 // handleRotation serves a request addressed to a rotation group alias on the
-// Go tier. Each model gets at most three calls, within the request-wide
-// Retry.MaxAttempts cap and backoff. HTTP 401/403/429 are relayed immediately
-// (including Retry-After), without changing model, key or proxy. Other quota
-// failures pause the model and move on; three ordinary failures pause it for
-// 15 seconds. The walk ends on success, after downstream commitment, after
-// three ordinary model failures, or when no usable model or budget remains.
+// Go tier. Each model gets at most three selection rounds; a round may make
+// configured same-account retries, all within Retry.MaxAttempts and backoff.
+// Exhausted HTTP 401/403/429 are relayed with Retry-After, never failing over
+// to another model/key/proxy. Other quota failures pause the model and move on;
+// three ordinary failures pause it for 15 seconds. The walk ends on success,
+// after downstream commitment, after three ordinary model failures, or when
+// no usable model or budget remains.
 // Unanswered requests receive 503, or 504 when the total deadline expires.
 func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, external wire.Protocol, payload map[string]any, id, alias string) {
 	g.syncRotation()
@@ -127,6 +129,10 @@ rotationLoop:
 				meta.UsageReported = false
 			}
 			result := g.rotationAttempt(ctx, w, r, external, payload, alias, route, ids, total)
+			total += max(result.used-1, 0)
+			if meta != nil {
+				meta.Attempts = total
+			}
 			outcome := result.reason
 			if result.err == nil {
 				outcome = "success"
@@ -201,10 +207,10 @@ rotationLoop:
 func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter, original *http.Request, external wire.Protocol, payload map[string]any, alias string, route models.Route, ids identity.RequestIDs, attempt int) groupAttempt {
 	result := groupAttempt{reason: "upstream_error", pause: 60 * time.Second}
 	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
+	defer func() { cancel() }()
 	seconds := g.rotation.Snapshot().FirstOutputSeconds
 	timer := time.AfterFunc(time.Duration(seconds)*time.Second, cancel)
-	defer timer.Stop()
+	defer func() { timer.Stop() }()
 	copyPayload := make(map[string]any, len(payload))
 	for k, v := range payload {
 		copyPayload[k] = v
@@ -220,8 +226,8 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	setRequestShape(parent, shaped, toolAlias)
 	cursor := g.goNodes.CursorFor(ids.Session)
 	var node *upstreamNode
-	// Each group attempt is exactly one HTTP call. Key selection may change,
-	// but there is no nested retry, stale-reasoning replay, or model-wide key ban.
+	// Select a key once for the whole same-account retry group. No nested
+	// key/proxy rotation or stale-reasoning repair is allowed inside it.
 	for n := 0; n < attempt; n++ {
 		node = cursor.Next()
 	}
@@ -244,21 +250,36 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	client := *proxy.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	setRequestCredential(parent, config.TierGo, config.KeyDisplayID(node.key), "key", false, proxy)
-	started := time.Now()
 	if proxy.pool {
 		req.Close = true
 	}
-	resp, err := doInferenceAttempt(&client, req, 0, g.attemptTimeout)
-	if err != nil && ctx.Err() != nil && parent.Err() == nil && !isProxyFailure(err) {
-		// The rotation-specific first-output deadline is not evidence that the
-		// proxy route failed. It still counts as a failed key attempt.
-		err = errFirstEventTimeout
-	}
-	g.recordUpstreamAttempt(parent, route, ids, attempt, config.KeyDisplayID(node.key), "key", false, proxy, resp, err, time.Since(started))
+	resp, err, used := sameAccountAttempts(parent, g.cfg.Retry, attempt-1, func(number int) (*http.Response, error) {
+		if number != attempt {
+			timer.Stop()
+			cancel()
+			ctx, cancel = context.WithCancel(parent)
+			timer = time.AfterFunc(time.Duration(seconds)*time.Second, cancel)
+		}
+		request := req.Clone(ctx)
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		if meta := telemetry.MetaFromContext(parent); meta != nil {
+			meta.Attempts = number
+		}
+		started := time.Now()
+		resp, err := doInferenceAttempt(&client, request, 0, g.attemptTimeout)
+		if err != nil && ctx.Err() != nil && parent.Err() == nil && !isProxyFailure(err) {
+			err = errFirstEventTimeout
+		}
+		if parent.Err() == nil {
+			g.recordUpstreamAttempt(parent, route, ids, number, config.KeyDisplayID(node.key), "key", false, proxy, resp, err, time.Since(started))
+		}
+		return resp, err
+	})
+	result.used = used
 	if resp != nil {
 		defer resp.Body.Close()
 	}
-	if parent.Err() == nil && !terminalRetryResponse(resp) {
+	if parent.Err() == nil {
 		g.observeKeyResult(parent, g.goNodes, node, proxy, resp, err)
 	}
 	if err != nil {

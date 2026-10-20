@@ -95,6 +95,10 @@ type RetryConfig struct {
 	// initial delay as the cap (fixed delay). Values are milliseconds.
 	BackoffInitialMS int `json:"backoff_initial_ms"`
 	BackoffMaxMS     int `json:"backoff_max_ms"`
+	// SameAccountRetries counts extra calls at the exact same key/proxy/origin.
+	// All calls still consume MaxAttempts. Empty codes mean 401,403,429.
+	SameAccountRetries     int    `json:"same_account_retries"`
+	SameAccountStatusCodes string `json:"same_account_status_codes"`
 }
 
 // ModelsConfig controls model discovery and routing. RefreshSeconds is the
@@ -270,6 +274,12 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if cfg.Retry.BackoffMaxMS > 0 && cfg.Retry.BackoffMaxMS < cfg.Retry.BackoffInitialMS {
 		return Config{}, errors.New("retry.backoff_max_ms must be zero or at least backoff_initial_ms")
 	}
+	if cfg.Retry.SameAccountRetries < 0 || cfg.Retry.SameAccountRetries > 100 {
+		return Config{}, errors.New("retry.same_account_retries must be between 0 and 100")
+	}
+	if _, err := cfg.Retry.SameAccountStatuses(); err != nil {
+		return Config{}, err
+	}
 	if cfg.Models.RefreshSeconds < 1 {
 		return Config{}, errors.New("models.refresh_seconds must be at least 1")
 	}
@@ -434,6 +444,15 @@ func (cfg *Config) PasswordForSave() {
 // Clone returns a copy of cfg whose slices and maps, including the rotation
 // orders and the resolved proxy list, no longer share storage with cfg.
 func Clone(cfg Config) Config {
+	if cfg.ProxyClean.AutoCollect != nil {
+		v := *cfg.ProxyClean.AutoCollect
+		cfg.ProxyClean.AutoCollect = &v
+	}
+	if cfg.ProxyClean.AutoSwitchProxy != nil {
+		v := *cfg.ProxyClean.AutoSwitchProxy
+		cfg.ProxyClean.AutoSwitchProxy = &v
+	}
+	cfg.ProxyClean.CustomSources = append([]ProxyCleanCustomSource(nil), cfg.ProxyClean.CustomSources...)
 	cfg.ProxyClean.Sources = append([]string(nil), cfg.ProxyClean.Sources...)
 	cfg.Rotation.SOTA.Order = append([]string(nil), cfg.Rotation.SOTA.Order...)
 	cfg.Rotation.Sweet.Order = append([]string(nil), cfg.Rotation.Sweet.Order...)

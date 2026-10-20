@@ -12,6 +12,14 @@ import (
 // ProxyCleanStatus contains operational counts and safe codes only. No proxy
 // endpoints, credentials, upstream headers or fetch error text leave the worker.
 type ProxyCleanStatus struct {
+	Total          int                      `json:"total"`
+	Healthy        int                      `json:"healthy"`
+	Cooling        int                      `json:"cooling"`
+	Disabled       int                      `json:"disabled"`
+	LastProbeAt    *time.Time               `json:"last_probe_at,omitempty"`
+	NextProbeAt    *time.Time               `json:"next_probe_at,omitempty"`
+	NextRefreshAt  *time.Time               `json:"next_refresh_at,omitempty"`
+	Operation      string                   `json:"operation"`
 	Sources        []ProxyCleanSourceStatus `json:"sources"`
 	Enabled        bool                     `json:"enabled"`
 	Scope          string                   `json:"scope"`
@@ -30,20 +38,29 @@ type proxyCleanSnapshot struct {
 }
 
 type proxyCleanPool struct {
-	collector     *proxyCleanCollector
-	cfg           config.ProxyCleanConfig
-	performance   config.PerformanceConfig
-	headerTimeout time.Duration
-	active        atomic.Pointer[proxyCleanSnapshot]
-	blockedUntil  *atomic.Int64
-	fallback      *anonymousNodes
-	mu            sync.Mutex
-	status        ProxyCleanStatus
-	candidates    []*anonymousNode
-	lastGood      time.Time
-	fetch         func(context.Context) ([]string, error)
-	probe         func(context.Context, *proxyTransport, time.Duration) bool
-	now           func() time.Time
+	lastCollectAttempt atomic.Int64
+	lastProbeAt        atomic.Int64
+	nextProbeAt        atomic.Int64
+	nextRefreshAt      atomic.Int64
+	disabledStore      *proxyCleanDisabledStore
+	opMu               sync.Mutex
+	opContext          context.Context
+	operation          string
+	opWG               sync.WaitGroup
+	collector          *proxyCleanCollector
+	cfg                config.ProxyCleanConfig
+	performance        config.PerformanceConfig
+	headerTimeout      time.Duration
+	active             atomic.Pointer[proxyCleanSnapshot]
+	blockedUntil       *atomic.Int64
+	fallback           *anonymousNodes
+	mu                 sync.Mutex
+	status             ProxyCleanStatus
+	candidates         []*anonymousNode
+	lastGood           time.Time
+	fetch              func(context.Context) ([]string, error)
+	probe              func(context.Context, *proxyTransport, time.Duration) bool
+	now                func() time.Time
 }
 
 func newProxyCleanPool(cfg config.Config) (*proxyCleanPool, error) {
@@ -53,6 +70,7 @@ func newProxyCleanPool(cfg config.Config) (*proxyCleanPool, error) {
 		return nil, err
 	}
 	p := &proxyCleanPool{cfg: c, performance: cfg.Performance, headerTimeout: cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds) * time.Second), now: time.Now, probe: probeProxyClean}
+	p.disabledStore, _ = loadProxyCleanDisabled("")
 	p.blockedUntil = &atomic.Int64{}
 	p.status = ProxyCleanStatus{Enabled: c.Enabled, Scope: "anonymous-only", SourceStatus: "loading"}
 	p.collector = newProxyCleanCollector(c)
@@ -82,7 +100,7 @@ func (p *proxyCleanPool) current() *anonymousNodes {
 	if s != nil && p.now().Before(s.expires) {
 		rebuild := len(s.pool.nodes) == 0
 		for _, n := range s.pool.nodes {
-			if !n.proxy.healthy.Load() || n.cooldownUntil.Load() > p.now().UnixNano() {
+			if n.disabled() || !n.proxy.healthy.Load() || n.cooldownUntil.Load() > p.now().UnixNano() {
 				rebuild = true
 				break
 			}
@@ -97,7 +115,7 @@ func (p *proxyCleanPool) current() *anonymousNodes {
 		}
 		if s != nil && p.now().Before(s.expires) {
 			for _, n := range s.pool.nodes {
-				if n.proxy.healthy.Load() && n.cooldownUntil.Load() <= p.now().UnixNano() {
+				if !n.disabled() && n.proxy.healthy.Load() && n.cooldownUntil.Load() <= p.now().UnixNano() {
 					return s.pool
 				}
 			}
@@ -107,9 +125,44 @@ func (p *proxyCleanPool) current() *anonymousNodes {
 }
 
 func (p *proxyCleanPool) view() ProxyCleanStatus {
+	p.opMu.Lock()
+	operation := p.operation
+	p.opMu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	v := p.status
+	v.Operation = operation
+	v.LastProbeAt = proxyCleanTime(p.lastProbeAt.Load())
+	v.LastRefreshAt = proxyCleanTime(p.lastCollectAttempt.Load())
+	v.NextProbeAt = proxyCleanTime(p.nextProbeAt.Load())
+	if p.cfg.AutoCollectEnabled() {
+		v.NextRefreshAt = proxyCleanTime(p.nextRefreshAt.Load())
+	}
+	nowUnix := p.now().UnixNano()
+	fresh := !p.lastGood.IsZero() && p.now().Before(p.lastGood.Add(time.Duration(p.cfg.TTLSeconds)*time.Second))
+	v.Total = len(p.candidates)
+	for _, n := range p.candidates {
+		if n.disabled() {
+			v.Disabled++
+			continue
+		}
+		if n.cooldownUntil.Load() > nowUnix {
+			v.Cooling++
+			continue
+		}
+		if fresh && n.proxy.healthy.Load() {
+			v.Healthy++
+		}
+	}
+	if p.cfg.AutoCollectEnabled() && p.cfg.MinHealthyNodes > 0 && p.blockedUntil.Load() <= nowUnix && p.transportHealthyLocked(p.now()) < p.cfg.MinHealthyNodes {
+		due := time.Unix(0, p.lastCollectAttempt.Load()).Add(time.Duration(p.cfg.RefillIntervalSeconds) * time.Second)
+		if due.Before(p.now()) {
+			due = p.now()
+		}
+		if v.NextRefreshAt == nil || due.Before(*v.NextRefreshAt) {
+			v.NextRefreshAt = &due
+		}
+	}
 	if p.collector != nil {
 		v.Sources = p.collector.view()
 		for _, source := range v.Sources {
@@ -123,7 +176,7 @@ func (p *proxyCleanPool) view() ProxyCleanStatus {
 	s := p.active.Load()
 	if s != nil && now.Before(s.expires) {
 		for _, n := range s.pool.nodes {
-			if n.proxy.healthy.Load() && n.cooldownUntil.Load() <= now.UnixNano() {
+			if !n.disabled() && n.proxy.healthy.Load() && n.cooldownUntil.Load() <= now.UnixNano() {
 				v.HealthyCount++
 			}
 		}
@@ -152,41 +205,65 @@ func (p *proxyCleanPool) view() ProxyCleanStatus {
 // inherit keeps the last-good TTL and node cooldowns on unrelated config
 // applies. It shares only immutable snapshots and atomically updated nodes.
 func (p *proxyCleanPool) inherit(old *proxyCleanPool) {
-	if old == nil || !p.cfg.Equal(old.cfg) || p.performance != old.performance || p.headerTimeout != old.headerTimeout {
+	if old == nil {
 		return
 	}
-	old.mu.Lock()
-	defer old.mu.Unlock()
+	p.collector.inherit(old.collector)
 	p.blockedUntil = old.blockedUntil
 	if p.fallback != nil {
 		p.fallback.blockedUntil = p.blockedUntil
 	}
+	// Operational switches do not invalidate a fresh source snapshot.
+	currentSettings, oldSettings := p.cfg, old.cfg
+	currentSettings.MinHealthyNodes = 0
+	oldSettings.MinHealthyNodes = 0
+	currentSettings.RefillIntervalSeconds = 0
+	oldSettings.RefillIntervalSeconds = 0
+	currentSettings.AutoCollect = nil
+	oldSettings.AutoCollect = nil
+	currentSettings.AutoSwitchProxy = nil
+	oldSettings.AutoSwitchProxy = nil
+	if !currentSettings.Equal(oldSettings) || p.performance != old.performance || p.headerTimeout != old.headerTimeout {
+		return
+	}
+	old.mu.Lock()
+	defer old.mu.Unlock()
+	p.disabledStore = old.disabledStore
 	p.candidates = append([]*anonymousNode(nil), old.candidates...)
 	p.lastGood = old.lastGood
+	p.lastCollectAttempt.Store(old.lastCollectAttempt.Load())
+	p.lastProbeAt.Store(old.lastProbeAt.Load())
 	p.status = old.status
 	p.active.Store(old.active.Load())
 }
 
 func (p *proxyCleanPool) run(ctx context.Context) {
-	defer p.closeIdle()
-	p.refresh(ctx)
-	refresh := time.NewTicker(time.Duration(p.cfg.RefreshSeconds) * time.Second)
-	defer refresh.Stop()
-	probe := time.NewTicker(time.Duration(p.cfg.ProbeIntervalSeconds) * time.Second)
-	defer probe.Stop()
+	defer func() {
+		p.opMu.Lock()
+		p.opContext = nil
+		p.opMu.Unlock()
+		p.opWG.Wait()
+		p.nextProbeAt.Store(0)
+		p.nextRefreshAt.Store(0)
+		p.closeIdle()
+	}()
+	if p.cfg.AutoCollectEnabled() {
+		_ = p.launch("refresh")
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-refresh.C:
-			p.refresh(ctx)
-		case <-probe.C:
-			p.check(ctx)
+		case <-ticker.C:
+			p.schedule()
 		}
 	}
 }
 
 func (p *proxyCleanPool) refresh(ctx context.Context) {
+	p.lastCollectAttempt.Store(p.now().UnixNano())
 	addresses, err := p.fetch(ctx)
 	if ctx.Err() != nil {
 		return
@@ -207,6 +284,9 @@ func (p *proxyCleanPool) refresh(ctx context.Context) {
 		p.mu.Unlock()
 		return
 	}
+	if len(addresses) > p.cfg.MaxCandidates {
+		addresses = addresses[:p.cfg.MaxCandidates]
+	}
 	old := make(map[string]*anonymousNode, len(p.candidates))
 	for _, n := range p.candidates {
 		old[n.proxy.name] = n
@@ -225,7 +305,7 @@ func (p *proxyCleanPool) refresh(ctx context.Context) {
 		t := transports.items[0]
 		secureProxyCleanTransport(t)
 		t.healthy.Store(false)
-		next = append(next, &anonymousNode{proxy: t})
+		next = append(next, &anonymousNode{proxy: t, disableState: p.disabledStore})
 	}
 	for _, n := range old {
 		n.proxy.client.CloseIdleConnections()
@@ -250,7 +330,7 @@ func (p *proxyCleanPool) publishLocked() {
 		if len(nodes) >= p.cfg.MaxNodes {
 			break
 		}
-		if n.proxy.healthy.Load() && n.cooldownUntil.Load() <= now.UnixNano() {
+		if !n.disabled() && n.proxy.healthy.Load() && n.cooldownUntil.Load() <= now.UnixNano() {
 			nodes = append(nodes, n)
 		}
 	}
@@ -282,22 +362,27 @@ func (p *proxyCleanPool) check(ctx context.Context) {
 					continue
 				}
 				n.proxy.publicStateMu.Lock()
-				if n.cooldownUntil.Load() > p.now().UnixNano() {
+				if n.disabled() || n.cooldownUntil.Load() > p.now().UnixNano() {
 					n.proxy.publicStateMu.Unlock()
 					continue
 				}
 				generation := n.proxy.publicGeneration
 				n.proxy.publicStateMu.Unlock()
+				probeStarted := time.Now()
 				healthy := p.probe(ctx, n.proxy, time.Duration(p.cfg.ProbeTimeoutSeconds)*time.Second)
+				latency := time.Since(probeStarted).Milliseconds()
 				n.proxy.publicStateMu.Lock()
 				// The compare and state commit share the same lock as business updates.
 				// A stale success must not erase a later request's failure/cooldown;
 				// conversely, a stale failed probe must not erase business recovery.
-				if ctx.Err() != nil || n.proxy.publicGeneration != generation {
+				if ctx.Err() != nil || n.disabled() || n.proxy.publicGeneration != generation {
 					n.proxy.publicStateMu.Unlock()
 					continue
 				}
 				n.proxy.publicGeneration++
+				n.lastProbeAt.Store(p.now().UnixNano())
+				n.probeLatencyMS.Store(latency)
+				n.lastProbeOK.Store(healthy)
 				n.proxy.healthy.Store(healthy)
 				if healthy {
 					n.failures.Store(0)
@@ -311,7 +396,7 @@ func (p *proxyCleanPool) check(ctx context.Context) {
 		}()
 	}
 	for _, n := range nodes {
-		if n.cooldownUntil.Load() > p.now().UnixNano() {
+		if n.disabled() || n.cooldownUntil.Load() > p.now().UnixNano() {
 			continue
 		}
 		select {
@@ -324,6 +409,8 @@ func (p *proxyCleanPool) check(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	p.lastProbeAt.Store(p.now().UnixNano())
+	p.nextProbeAt.Store(p.now().Add(time.Duration(p.cfg.ProbeIntervalSeconds) * time.Second).UnixNano())
 	p.mu.Lock()
 	p.publishLocked()
 	p.mu.Unlock()

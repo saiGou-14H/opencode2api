@@ -14,25 +14,38 @@ func (c ProxyCleanConfig) Equal(other ProxyCleanConfig) bool { return reflect.De
 const DefaultProxyCleanSource = "https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt"
 
 // ProxyCleanConfig is deliberately restricted to the anonymous free lane.
-// Only explicit public source adapters are supported; arbitrary URLs are rejected.
+// Explicit public adapters and validated custom HTTPS text lists are supported.
 type ProxyCleanConfig struct {
-	Sources              []string `json:"sources"`
-	Enabled              bool     `json:"enabled"`
-	Scope                string   `json:"scope"`
-	SourceURL            string   `json:"source_url"`
-	RefreshSeconds       int      `json:"refresh_seconds"`
-	TTLSeconds           int      `json:"ttl_seconds"`
-	ProbeIntervalSeconds int      `json:"probe_interval_seconds"`
-	ProbeTimeoutSeconds  int      `json:"probe_timeout_seconds"`
-	ProbeConcurrency     int      `json:"probe_concurrency"`
-	MaxCandidates        int      `json:"max_candidates"`
-	MaxNodes             int      `json:"max_nodes"`
-	CooldownSeconds      int      `json:"cooldown_seconds"`
-	AllowDirectFallback  bool     `json:"allow_direct_fallback"`
+	MinHealthyNodes       int                      `json:"min_healthy_nodes"`
+	RefillIntervalSeconds int                      `json:"refill_interval_seconds"`
+	CustomSources         []ProxyCleanCustomSource `json:"custom_sources,omitempty"`
+	AutoSwitchProxy       *bool                    `json:"auto_switch_proxy,omitempty"`
+	AutoCollect           *bool                    `json:"auto_collect,omitempty"`
+	Sources               []string                 `json:"sources"`
+	Enabled               bool                     `json:"enabled"`
+	Scope                 string                   `json:"scope"`
+	SourceURL             string                   `json:"source_url"`
+	RefreshSeconds        int                      `json:"refresh_seconds"`
+	TTLSeconds            int                      `json:"ttl_seconds"`
+	ProbeIntervalSeconds  int                      `json:"probe_interval_seconds"`
+	ProbeTimeoutSeconds   int                      `json:"probe_timeout_seconds"`
+	ProbeConcurrency      int                      `json:"probe_concurrency"`
+	MaxCandidates         int                      `json:"max_candidates"`
+	MaxNodes              int                      `json:"max_nodes"`
+	CooldownSeconds       int                      `json:"cooldown_seconds"`
+	AllowDirectFallback   bool                     `json:"allow_direct_fallback"`
 }
 
+func (c ProxyCleanConfig) AutoSwitchEnabled() bool {
+	return c.AutoSwitchProxy == nil || *c.AutoSwitchProxy
+}
+func (c ProxyCleanConfig) AutoCollectEnabled() bool { return c.AutoCollect == nil || *c.AutoCollect }
+
 func (c *ProxyCleanConfig) Defaults() {
-	if len(c.Sources) == 0 {
+	for i := range c.CustomSources {
+		c.CustomSources[i].defaults()
+	}
+	if len(c.Sources) == 0 && len(c.CustomSources) == 0 {
 		c.Sources = []string{"proxyclean"}
 	}
 	if c.Scope == "" {
@@ -44,7 +57,7 @@ func (c *ProxyCleanConfig) Defaults() {
 	for _, v := range []struct {
 		p *int
 		d int
-	}{{&c.RefreshSeconds, 3600}, {&c.TTLSeconds, 7200}, {&c.ProbeIntervalSeconds, 300}, {&c.ProbeTimeoutSeconds, 8}, {&c.ProbeConcurrency, 8}, {&c.MaxCandidates, 100}, {&c.MaxNodes, 20}, {&c.CooldownSeconds, 60}} {
+	}{{&c.RefillIntervalSeconds, 300}, {&c.RefreshSeconds, 3600}, {&c.TTLSeconds, 7200}, {&c.ProbeIntervalSeconds, 300}, {&c.ProbeTimeoutSeconds, 8}, {&c.ProbeConcurrency, 8}, {&c.MaxCandidates, 100}, {&c.MaxNodes, 20}, {&c.CooldownSeconds, 60}} {
 		if *v.p == 0 {
 			*v.p = v.d
 		}
@@ -52,8 +65,11 @@ func (c *ProxyCleanConfig) Defaults() {
 }
 
 func (c ProxyCleanConfig) Validate() error {
-	if len(c.Sources) == 0 || len(c.Sources) > len(ProxyCleanSourceIDs) {
-		return fmt.Errorf("proxyclean.sources must select one to seven supported sources")
+	if err := validateProxyCleanCustomSources(c.CustomSources); err != nil {
+		return err
+	}
+	if (len(c.Sources) == 0 && len(c.CustomSources) == 0) || len(c.Sources) > len(ProxyCleanSourceIDs) {
+		return fmt.Errorf("proxyclean.sources must select at least one built-in or custom source")
 	}
 	seen := map[string]bool{}
 	for _, id := range c.Sources {
@@ -79,7 +95,7 @@ func (c ProxyCleanConfig) Validate() error {
 	for _, v := range []struct {
 		name      string
 		n, lo, hi int
-	}{{"refresh_seconds", c.RefreshSeconds, 30, 86400}, {"ttl_seconds", c.TTLSeconds, 30, 172800}, {"probe_interval_seconds", c.ProbeIntervalSeconds, 10, 3600}, {"probe_timeout_seconds", c.ProbeTimeoutSeconds, 1, 30}, {"probe_concurrency", c.ProbeConcurrency, 1, 32}, {"max_candidates", c.MaxCandidates, 1, 1000}, {"max_nodes", c.MaxNodes, 1, 100}, {"cooldown_seconds", c.CooldownSeconds, 1, 3600}} {
+	}{{"refill_interval_seconds", c.RefillIntervalSeconds, 30, 86400}, {"min_healthy_nodes", c.MinHealthyNodes, 0, c.MaxNodes}, {"refresh_seconds", c.RefreshSeconds, 30, 86400}, {"ttl_seconds", c.TTLSeconds, 30, 172800}, {"probe_interval_seconds", c.ProbeIntervalSeconds, 10, 3600}, {"probe_timeout_seconds", c.ProbeTimeoutSeconds, 1, 30}, {"probe_concurrency", c.ProbeConcurrency, 1, 32}, {"max_candidates", c.MaxCandidates, 1, 1000}, {"max_nodes", c.MaxNodes, 1, 100}, {"cooldown_seconds", c.CooldownSeconds, 1, 3600}} {
 		if v.n < v.lo || v.n > v.hi {
 			return fmt.Errorf("proxyclean.%s must be between %d and %d", v.name, v.lo, v.hi)
 		}

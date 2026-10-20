@@ -9,6 +9,11 @@
   "proxyclean": {
     "enabled": false,
     "sources": ["proxyclean"],
+    "custom_sources": [],
+    "auto_switch_proxy": true,
+    "auto_collect": true,
+    "min_healthy_nodes": 0,
+    "refill_interval_seconds": 300,
     "scope": "anonymous-only",
     "source_url": "https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt",
     "refresh_seconds": 3600,
@@ -28,6 +33,8 @@
   },
   "retry": {
     "max_attempts": 3,
+    "same_account_retries": 0,
+    "same_account_status_codes": "",
     "timeout_seconds": 300,
     "backoff_initial_ms": 0,
     "backoff_max_ms": 0

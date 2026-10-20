@@ -9,8 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"strconv"
-	"strings"
 	"time"
 
 	"opencode2api/internal/config"
@@ -49,38 +47,30 @@ func parseProxyCleanList(r io.Reader, limit int) ([]string, error) {
 }
 
 func parseProxyCleanListLimit(r io.Reader, limit int, maxBytes int64) ([]string, error) {
-	s := bufio.NewScanner(io.LimitReader(r, maxBytes+1))
+	return parseProxyList(r, limit, maxBytes, "socks5", false)
+}
+
+func parseProxyList(r io.Reader, limit int, maxBytes int64, defaultProtocol string, multiProtocol bool) ([]string, error) {
+	limited := &io.LimitedReader{R: r, N: maxBytes + 1}
+	s := bufio.NewScanner(limited)
 	s.Buffer(make([]byte, 4096), 4096)
 	seen := map[string]bool{}
 	var out []string
-	total := 0
 	for s.Scan() {
-		total += len(s.Bytes()) + 1
-		if int64(total) > maxBytes {
+		if limited.N == 0 {
 			return nil, errors.New("source_too_large")
 		}
-		line := strings.TrimSpace(strings.SplitN(s.Text(), "#", 2)[0])
-		if line == "" {
+		normalized := normalizeProxyCandidate(s.Text(), defaultProtocol, multiProtocol)
+		if normalized == "" {
 			continue
 		}
-		line = strings.TrimPrefix(line, "socks5://")
-		host, port, err := net.SplitHostPort(line)
-		if err != nil {
-			continue
-		}
-		ip, err := netip.ParseAddr(host)
-		if err != nil || !publicProxyIP(ip) {
-			continue
-		}
-		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
-			continue
-		}
-		normalized := "socks5://" + net.JoinHostPort(ip.String(), strconv.Itoa(n))
 		if !seen[normalized] && len(out) < limit {
 			seen[normalized] = true
 			out = append(out, normalized)
 		}
+	}
+	if limited.N == 0 {
+		return nil, errors.New("source_too_large")
 	}
 	if s.Err() != nil {
 		return nil, errors.New("source_invalid")
@@ -134,6 +124,10 @@ type proxyCleanSourceHTTPError struct{ RetryAfter time.Duration }
 func (e *proxyCleanSourceHTTPError) Error() string { return "source_http_status" }
 
 func fetchProxyCleanLimit(ctx context.Context, c config.ProxyCleanConfig, client *http.Client, maxBytes int64) ([]string, error) {
+	return fetchProxyList(ctx, c, client, maxBytes, "socks5", false)
+}
+
+func fetchProxyList(ctx context.Context, c config.ProxyCleanConfig, client *http.Client, maxBytes int64, defaultProtocol string, multiProtocol bool) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.SourceURL, nil)
 	if err != nil {
 		return nil, errors.New("source_request")
@@ -153,7 +147,7 @@ func fetchProxyCleanLimit(ctx context.Context, c config.ProxyCleanConfig, client
 		}
 		return nil, &proxyCleanSourceHTTPError{RetryAfter: delay}
 	}
-	return parseProxyCleanListLimit(resp.Body, c.MaxCandidates, maxBytes)
+	return parseProxyList(resp.Body, c.MaxCandidates, maxBytes, defaultProtocol, multiProtocol)
 }
 
 // Both clients enforce end-to-end HTTPS, including the uTLS Bun SOCKS path.

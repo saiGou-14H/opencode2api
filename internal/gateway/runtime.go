@@ -42,6 +42,9 @@ type ApplyResult struct {
 // runtime: the persisted rotation manager, the pricing metadata, the
 // free-model availability checks and the listeners bound at startup.
 type RuntimeController struct {
+	proxyCleanDisabled *proxyCleanDisabledStore
+	proxyCleanCooldown *atomic.Int64
+	proxyCleanSources  *proxyCleanCollectorState
 	rotation           *rotation.Manager
 	configPath         string
 	root               context.Context
@@ -166,6 +169,32 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 		return nil, err
 	}
 	gateway.rotation = m.rotation
+	if m.proxyCleanDisabled == nil {
+		path, pathErr := proxyCleanStatePath(m.configPath)
+		if pathErr != nil {
+			return nil, fmt.Errorf("resolve proxyclean state: %w", pathErr)
+		}
+		store, err := loadProxyCleanDisabled(path)
+		if err != nil {
+			return nil, fmt.Errorf("load proxyclean disabled state: %w", err)
+		}
+		m.proxyCleanDisabled = store
+	}
+	if m.proxyCleanCooldown == nil {
+		m.proxyCleanCooldown = &atomic.Int64{}
+	}
+	if gateway.publicPool != nil {
+		if m.proxyCleanSources == nil {
+			m.proxyCleanSources = gateway.publicPool.collector.shared
+		} else {
+			gateway.publicPool.collector.shared = m.proxyCleanSources
+		}
+		gateway.publicPool.disabledStore = m.proxyCleanDisabled
+		gateway.publicPool.blockedUntil = m.proxyCleanCooldown
+		if gateway.publicPool.fallback != nil {
+			gateway.publicPool.fallback.blockedUntil = m.proxyCleanCooldown
+		}
+	}
 	if current := m.current.Load(); current != nil && gateway.publicPool != nil {
 		gateway.publicPool.inherit(current.gateway.publicPool)
 	}
@@ -199,7 +228,7 @@ func (m *RuntimeController) start(runtime *gatewayRuntime) {
 	runtimeCtx, cancel := context.WithCancel(m.root)
 	runtime.cancel = cancel
 	if runtime.gateway.publicPool != nil {
-		go runtime.gateway.publicPool.run(runtimeCtx)
+		runtime.gateway.publicPool.start(runtimeCtx)
 	}
 	runtime.gateway.StartProxyHealthChecks(runtimeCtx)
 	runtime.gateway.StartModelRefresh(runtimeCtx)

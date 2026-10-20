@@ -65,9 +65,17 @@ type anonymousNodes struct {
 }
 
 type anonymousNode struct {
-	proxy         *proxyTransport
-	failures      atomic.Uint32
-	cooldownUntil atomic.Int64
+	disableState   *proxyCleanDisabledStore
+	lastProbeAt    atomic.Int64
+	probeLatencyMS atomic.Int64
+	lastProbeOK    atomic.Bool
+	proxy          *proxyTransport
+	failures       atomic.Uint32
+	cooldownUntil  atomic.Int64
+}
+
+func (n *anonymousNode) disabled() bool {
+	return n.disableState != nil && n.disableState.disabled(config.Fingerprint(n.proxy.name))
 }
 
 // anonymousCursor walks the anonymous nodes for one request from start;
@@ -159,7 +167,7 @@ func (c *anonymousCursor) Next() *anonymousNode {
 		idx := (c.start + c.offset) % n
 		c.offset++
 		node := c.pool.nodes[idx]
-		if node.proxy.pool || (!c.used[idx] && node.proxy.healthy.Load() && node.cooldownUntil.Load() <= now) {
+		if !node.disabled() && (node.proxy.pool || (!c.used[idx] && node.proxy.healthy.Load() && node.cooldownUntil.Load() <= now)) {
 			c.used[idx] = true
 			return node
 		}

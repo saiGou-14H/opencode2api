@@ -18,40 +18,116 @@ type ProxyCleanSourceStatus struct {
 	LastFetchAt    *time.Time `json:"last_fetch_at,omitempty"`
 	LastError      string     `json:"last_error"`
 }
+type proxyCleanInputSource struct {
+	id, url, defaultProtocol string
+	multiProtocol            bool
+}
 
-type proxyCleanCollector struct {
-	cfg       config.ProxyCleanConfig
-	client    *http.Client
+// Shared across hot updates so a late response from the previous runtime still
+// establishes cooldown before its replacement can fetch that same source.
+type proxyCleanCollectorState struct {
 	mu        sync.Mutex
-	statuses  []ProxyCleanSourceStatus
 	nextFetch map[string]time.Time
-	now       func() time.Time
+	inFlight  map[string]bool
+	statuses  map[string]ProxyCleanSourceStatus
+}
+type proxyCleanCollector struct {
+	sources []proxyCleanInputSource
+	cfg     config.ProxyCleanConfig
+	client  *http.Client
+	shared  *proxyCleanCollectorState
+	now     func() time.Time
 }
 
 func newProxyCleanCollector(cfg config.ProxyCleanConfig) *proxyCleanCollector {
 	cfg.Defaults()
-	c := &proxyCleanCollector{cfg: cfg, client: proxyCleanSourceClient(), now: time.Now, nextFetch: make(map[string]time.Time)}
+	c := &proxyCleanCollector{cfg: cfg, client: proxyCleanSourceClient(), now: time.Now, shared: &proxyCleanCollectorState{nextFetch: map[string]time.Time{}, inFlight: map[string]bool{}, statuses: map[string]ProxyCleanSourceStatus{}}}
 	c.client.Timeout = 45 * time.Second
 	for _, id := range cfg.Sources {
-		c.statuses = append(c.statuses, ProxyCleanSourceStatus{ID: id, Status: "pending"})
+		c.sources = append(c.sources, proxyCleanInputSource{id: id, url: proxyCleanSourceURLs[id], defaultProtocol: "socks5"})
+	}
+	for _, s := range cfg.CustomSources {
+		c.sources = append(c.sources, proxyCleanInputSource{id: "custom-" + config.Fingerprint(s.URL), url: s.URL, defaultProtocol: s.DefaultProtocol, multiProtocol: true})
 	}
 	return c
 }
-
+func (c *proxyCleanCollector) inherit(old *proxyCleanCollector) {
+	if c != nil && old != nil {
+		c.shared = old.shared
+	}
+}
 func (c *proxyCleanCollector) view() []ProxyCleanSourceStatus {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]ProxyCleanSourceStatus(nil), c.statuses...)
+	c.shared.mu.Lock()
+	defer c.shared.mu.Unlock()
+	out := make([]ProxyCleanSourceStatus, 0, len(c.sources))
+	for _, s := range c.sources {
+		v, ok := c.shared.statuses[s.id]
+		if !ok {
+			v = ProxyCleanSourceStatus{ID: s.id, Status: "pending"}
+		}
+		out = append(out, v)
+	}
+	return out
+}
+func (c *proxyCleanCollector) fetchOne(ctx context.Context, source proxyCleanInputSource) []string {
+	id := source.id
+	c.shared.mu.Lock()
+	if c.now().Before(c.shared.nextFetch[id]) || c.shared.inFlight[id] {
+		c.shared.mu.Unlock()
+		return nil
+	}
+	c.shared.inFlight[id] = true
+	c.shared.mu.Unlock()
+	at := c.now().UTC()
+	state := ProxyCleanSourceStatus{ID: id, Status: "error", LastFetchAt: &at}
+	retryAfter := time.Duration(0)
+	defer func() {
+		c.shared.mu.Lock()
+		defer c.shared.mu.Unlock()
+		if retryAfter > 0 {
+			until := c.now().Add(retryAfter)
+			if until.After(c.shared.nextFetch[id]) {
+				c.shared.nextFetch[id] = until
+			}
+		}
+		c.shared.statuses[id] = state
+		c.shared.inFlight[id] = false
+	}()
+	if source.url == "" {
+		state.LastError = "source_invalid"
+		return nil
+	}
+	cfg := c.cfg
+	cfg.SourceURL = source.url
+	maxBytes, timeout := proxyCleanSourceBudget(id)
+	sourceCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	nodes, err := fetchProxyList(sourceCtx, cfg, c.client, maxBytes, source.defaultProtocol, source.multiProtocol)
+	if err != nil {
+		var httpErr *proxyCleanSourceHTTPError
+		if errors.As(err, &httpErr) {
+			retryAfter = httpErr.RetryAfter
+		}
+		state.LastError = "source_fetch_failed"
+		switch err.Error() {
+		case "source_empty":
+			state.Status = "empty"
+			state.LastError = "source_empty"
+		case "source_invalid", "source_too_large", "source_http_status":
+			state.LastError = err.Error()
+		}
+		return nil
+	}
+	state.Status = "ready"
+	state.CandidateCount = len(nodes)
+	return nodes
 }
 
-// fetch has no unbounded retries and a fixed concurrency of three. Each source
-// is independently bounded by the HTTP timeout and parser limit. Failed sources
-// contribute no stale nodes to a new snapshot; all-source failure leaves the
-// pool's previous snapshot usable only until its original TTL.
+// Each source is independently bounded, with at most three parallel fetches.
+// Failed or rate-limited sources never extend a previous snapshot's TTL.
 func (c *proxyCleanCollector) fetch(ctx context.Context) ([]string, error) {
 	defer c.client.CloseIdleConnections()
-	lists := make([][]string, len(c.cfg.Sources))
-	states := make([]ProxyCleanSourceStatus, len(lists))
+	lists := make([][]string, len(c.sources))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 	workers := 3
@@ -63,50 +139,7 @@ func (c *proxyCleanCollector) fetch(ctx context.Context) ([]string, error) {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				id := c.cfg.Sources[i]
-				c.mu.Lock()
-				blocked := c.now().Before(c.nextFetch[id])
-				previous := c.statuses[i]
-				c.mu.Unlock()
-				if blocked {
-					states[i] = previous
-					continue
-				}
-				at := c.now().UTC()
-				state := ProxyCleanSourceStatus{ID: id, Status: "error", LastFetchAt: &at}
-				url, known := proxyCleanSourceURLs[id]
-				if !known {
-					state.LastError = "source_invalid"
-					states[i] = state
-					continue
-				}
-				cfg := c.cfg
-				cfg.SourceURL = url
-				maxBytes, timeout := proxyCleanSourceBudget(id)
-				sourceCtx, cancel := context.WithTimeout(ctx, timeout)
-				nodes, err := fetchProxyCleanLimit(sourceCtx, cfg, c.client, maxBytes)
-				cancel()
-				if err != nil {
-					var httpErr *proxyCleanSourceHTTPError
-					if errors.As(err, &httpErr) && httpErr.RetryAfter > 0 {
-						c.mu.Lock()
-						c.nextFetch[id] = c.now().Add(httpErr.RetryAfter)
-						c.mu.Unlock()
-					}
-					state.LastError = "source_fetch_failed"
-					switch err.Error() {
-					case "source_empty":
-						state.Status = "empty"
-						state.LastError = "source_empty"
-					case "source_invalid", "source_too_large", "source_http_status":
-						state.LastError = err.Error()
-					}
-				} else {
-					state.Status = "ready"
-					state.CandidateCount = len(nodes)
-					lists[i] = nodes
-				}
-				states[i] = state
+				lists[i] = c.fetchOne(ctx, c.sources[i])
 			}
 		}()
 	}
@@ -121,11 +154,6 @@ func (c *proxyCleanCollector) fetch(ctx context.Context) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	c.statuses = states
-	c.mu.Unlock()
-	// Round-robin merge prevents the first large repository from starving every
-	// other source. Addresses are normalized and filtered before reaching here.
 	out := make([]string, 0, c.cfg.MaxCandidates)
 	seen := map[string]bool{}
 	for offset := 0; len(out) < c.cfg.MaxCandidates; offset++ {

@@ -23,6 +23,11 @@ func TestRetryBackoffValidation(t *testing.T) {
 		{"max too large", `,"backoff_max_ms":86400001`, false},
 		{"no attempts", `,"max_attempts":0`, false},
 		{"no deadline", `,"timeout_seconds":0`, false},
+		{"same account", `,"same_account_retries":2,"same_account_status_codes":"200,401,599"`, true},
+		{"same account upper bound", `,"same_account_retries":100`, true},
+		{"same account negative", `,"same_account_retries":-1`, false},
+		{"same account too large", `,"same_account_retries":101`, false},
+		{"same account invalid status", `,"same_account_status_codes":"401,600"`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")

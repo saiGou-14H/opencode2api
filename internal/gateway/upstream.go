@@ -387,12 +387,16 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			}
 			setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, node.proxy)
 			started := time.Now()
-			resp, err := doInferenceAttempt(g.inferenceClient(node.proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
+			resp, err, used := g.sameAccountInference(ctx, route, ids, node.proxy, g.inferenceClient(node.proxy, baseURL, route.ID), req, preparedBodies[index], attemptOffset+attempts-1, "anonymous", "anonymous", true)
+			attempts += used - 1
 			duration := time.Since(started)
 			if ctx.Err() != nil {
-				// The parent budget expired while this attempt was in flight. Its
-				// outcome says nothing about this proxy, so record nothing and stop
-				// scanning.
+				// A received rejection remains real even if its Retry-After wait
+				// was canceled. Cool once on final exit, never during the retry.
+				if terminalRetryResponse(resp) {
+					g.observeAnonymousResult(ctx, node, resp, nil)
+				}
+				// Cancellation alone is not evidence of a broken proxy.
 				lastResponse, lastErr = resp, err
 				if lastErr == nil && lastResponse == nil {
 					lastErr = ctx.Err()
@@ -401,10 +405,9 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			}
 			nodeResp, nodeErr = resp, err
 			if terminalRetryResponse(resp) {
-				g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
+				g.observeAnonymousResult(ctx, node, resp, err)
 				return resp, nil, attempts
 			}
-			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
 			if err == nil && resp.StatusCode/100 == 2 {
 				g.observeAnonymousResult(ctx, node, resp, nil)
 				g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
@@ -428,6 +431,11 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			break
 		}
 		g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)
+		// Disabling proxy switching pins the node, not its compatible origins.
+		// The inner loop may still try v1/v2 through this same exit.
+		if g.publicPool != nil && !g.cfg.ProxyClean.AutoSwitchEnabled() {
+			break
+		}
 	}
 	if lastResponse != nil {
 		return lastResponse, nil, attempts
@@ -1079,9 +1087,13 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		keyID := config.KeyDisplayID(node.key)
 		setRequestCredential(ctx, route.Tier, keyID, "key", false, proxy)
 		attemptStarted := time.Now()
-		resp, err := doInferenceAttempt(g.inferenceClient(proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
+		resp, err, used := g.sameAccountInference(ctx, route, ids, proxy, g.inferenceClient(proxy, baseURL, route.ID), req, body, attemptOffset+attempts-1, keyID, "key", false)
+		attempts += used - 1
 		attemptDuration := time.Since(attemptStarted)
 		if ctx.Err() != nil {
+			if terminalRetryResponse(resp) {
+				g.observeKeyResult(ctx, nodes, node, proxy, resp, nil)
+			}
 			// The request budget expired while this attempt was in flight. A
 			// canceled context says nothing about the key or the proxy: without
 			// this guard the instant DeadlineExceeded would cool a healthy key
@@ -1092,12 +1104,10 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			}
 			break
 		}
+		g.observeKeyResult(ctx, nodes, node, proxy, resp, err)
 		if terminalRetryResponse(resp) {
-			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, keyID, "key", false, proxy, resp, err, attemptDuration)
 			return resp, nil, attempts
 		}
-		g.observeKeyResult(ctx, nodes, node, proxy, resp, err)
-		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, keyID, "key", false, proxy, resp, err, attemptDuration)
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.logger.Debug("upstream accepted request", "component", "upstream", "event", "attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "status", resp.StatusCode, "duration_ms", attemptDuration.Milliseconds())
 			return resp, nil, attempts
