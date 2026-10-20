@@ -65,6 +65,8 @@ type anonymousNodes struct {
 }
 
 type anonymousNode struct {
+	requireCN      bool
+	exitEvidence   atomic.Pointer[proxyCleanExitEvidence]
 	disableState   *proxyCleanDisabledStore
 	lastProbeAt    atomic.Int64
 	probeLatencyMS atomic.Int64
@@ -167,7 +169,7 @@ func (c *anonymousCursor) Next() *anonymousNode {
 		idx := (c.start + c.offset) % n
 		c.offset++
 		node := c.pool.nodes[idx]
-		if !node.disabled() && (node.proxy.pool || (!c.used[idx] && node.proxy.healthy.Load() && node.cooldownUntil.Load() <= now)) {
+		if !node.disabled() && node.exitEligible(time.Unix(0, now)) && (node.proxy.pool || (!c.used[idx] && node.proxy.healthy.Load() && node.cooldownUntil.Load() <= now)) {
 			c.used[idx] = true
 			return node
 		}

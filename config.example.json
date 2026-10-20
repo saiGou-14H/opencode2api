@@ -8,6 +8,7 @@
   "proxyfile": "",
   "proxyclean": {
     "enabled": false,
+    "required_exit_country": "",
     "sources": ["proxyclean"],
     "custom_sources": [],
     "auto_switch_proxy": true,

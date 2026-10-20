@@ -18,6 +18,10 @@ var (
 )
 
 type ProxyCleanNodeView struct {
+	ExitIP              string     `json:"exit_ip,omitempty"`
+	ExitCountry         string     `json:"exit_country,omitempty"`
+	ExitCheckedAt       *time.Time `json:"exit_checked_at,omitempty"`
+	ExitExpiresAt       *time.Time `json:"exit_expires_at,omitempty"`
 	Protocol            string     `json:"protocol"`
 	ProbeLatencyMS      *int64     `json:"probe_latency_ms,omitempty"`
 	ConsecutiveFailures uint32     `json:"consecutive_failures"`
@@ -104,7 +108,12 @@ func (p *proxyCleanPool) nodesView() ProxyCleanNodesView {
 		if len(v.Nodes) >= 1000 {
 			break
 		}
-		item := ProxyCleanNodeView{ID: config.Fingerprint(n.proxy.name), Endpoint: n.proxy.name, Healthy: n.proxy.healthy.Load(), Disabled: n.disabled(), ConsecutiveFailures: n.failures.Load()}
+		item := ProxyCleanNodeView{ID: config.Fingerprint(n.proxy.name), Endpoint: n.proxy.name, Healthy: n.proxy.healthy.Load() && n.exitEligible(p.now()), Disabled: n.disabled(), ConsecutiveFailures: n.failures.Load()}
+		if evidence := n.exitEvidence.Load(); evidence != nil {
+			item.ExitIP, item.ExitCountry = evidence.IP, evidence.Country
+			checked, expires := evidence.Checked.UTC(), evidence.Expires.UTC()
+			item.ExitCheckedAt, item.ExitExpiresAt = &checked, &expires
+		}
 		if endpoint, err := url.Parse(n.proxy.name); err == nil {
 			item.Protocol = endpoint.Scheme
 		}

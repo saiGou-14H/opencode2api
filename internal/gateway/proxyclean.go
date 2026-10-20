@@ -38,6 +38,8 @@ type proxyCleanSnapshot struct {
 }
 
 type proxyCleanPool struct {
+	geo                *proxyCleanGeo
+	observeExit        func(context.Context, *proxyTransport) (string, error)
 	lastCollectAttempt atomic.Int64
 	lastProbeAt        atomic.Int64
 	nextProbeAt        atomic.Int64
@@ -69,7 +71,7 @@ func newProxyCleanPool(cfg config.Config) (*proxyCleanPool, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	p := &proxyCleanPool{cfg: c, performance: cfg.Performance, headerTimeout: cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds) * time.Second), now: time.Now, probe: probeProxyClean}
+	p := &proxyCleanPool{geo: newProxyCleanGeo(), observeExit: observeProxyCleanExit, cfg: c, performance: cfg.Performance, headerTimeout: cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds) * time.Second), now: time.Now, probe: probeProxyClean}
 	p.disabledStore, _ = loadProxyCleanDisabled("")
 	p.blockedUntil = &atomic.Int64{}
 	p.status = ProxyCleanStatus{Enabled: c.Enabled, Scope: "anonymous-only", SourceStatus: "loading"}
@@ -100,7 +102,7 @@ func (p *proxyCleanPool) current() *anonymousNodes {
 	if s != nil && p.now().Before(s.expires) {
 		rebuild := len(s.pool.nodes) == 0
 		for _, n := range s.pool.nodes {
-			if n.disabled() || !n.proxy.healthy.Load() || n.cooldownUntil.Load() > p.now().UnixNano() {
+			if n.disabled() || !n.exitEligible(p.now()) || !n.proxy.healthy.Load() || n.cooldownUntil.Load() > p.now().UnixNano() {
 				rebuild = true
 				break
 			}
@@ -115,7 +117,7 @@ func (p *proxyCleanPool) current() *anonymousNodes {
 		}
 		if s != nil && p.now().Before(s.expires) {
 			for _, n := range s.pool.nodes {
-				if !n.disabled() && n.proxy.healthy.Load() && n.cooldownUntil.Load() <= p.now().UnixNano() {
+				if !n.disabled() && n.exitEligible(p.now()) && n.proxy.healthy.Load() && n.cooldownUntil.Load() <= p.now().UnixNano() {
 					return s.pool
 				}
 			}
@@ -150,7 +152,7 @@ func (p *proxyCleanPool) view() ProxyCleanStatus {
 			v.Cooling++
 			continue
 		}
-		if fresh && n.proxy.healthy.Load() {
+		if fresh && n.exitEligible(p.now()) && n.proxy.healthy.Load() {
 			v.Healthy++
 		}
 	}
@@ -176,7 +178,7 @@ func (p *proxyCleanPool) view() ProxyCleanStatus {
 	s := p.active.Load()
 	if s != nil && now.Before(s.expires) {
 		for _, n := range s.pool.nodes {
-			if !n.disabled() && n.proxy.healthy.Load() && n.cooldownUntil.Load() <= now.UnixNano() {
+			if !n.disabled() && n.exitEligible(p.now()) && n.proxy.healthy.Load() && n.cooldownUntil.Load() <= now.UnixNano() {
 				v.HealthyCount++
 			}
 		}
@@ -191,6 +193,11 @@ func (p *proxyCleanPool) view() ProxyCleanStatus {
 		}
 	} else if v.SourceStatus != "loading" {
 		v.SourceStatus = "empty"
+	}
+	if p.cfg.RequiredExitCountry == "CN" && v.SourceStatus != "loading" && v.HealthyCount == 0 && p.transportHealthyLocked(now) == 0 {
+		// Safe diagnostic: neither source country labels nor unknown/expired
+		// observations establish a mainland exit. This is not a network verdict.
+		v.LastError = "exit_country_unavailable"
 	}
 	if until := p.blockedUntil.Load(); until > now.UnixNano() {
 		cooldownUntil := time.Unix(0, until).UTC()
@@ -210,6 +217,8 @@ func (p *proxyCleanPool) inherit(old *proxyCleanPool) {
 	}
 	p.collector.inherit(old.collector)
 	p.blockedUntil = old.blockedUntil
+	p.disabledStore = old.disabledStore
+	p.geo = old.geo
 	if p.fallback != nil {
 		p.fallback.blockedUntil = p.blockedUntil
 	}
@@ -305,7 +314,7 @@ func (p *proxyCleanPool) refresh(ctx context.Context) {
 		t := transports.items[0]
 		secureProxyCleanTransport(t)
 		t.healthy.Store(false)
-		next = append(next, &anonymousNode{proxy: t, disableState: p.disabledStore})
+		next = append(next, &anonymousNode{proxy: t, disableState: p.disabledStore, requireCN: p.cfg.RequiredExitCountry == "CN"})
 	}
 	for _, n := range old {
 		n.proxy.client.CloseIdleConnections()
@@ -330,7 +339,7 @@ func (p *proxyCleanPool) publishLocked() {
 		if len(nodes) >= p.cfg.MaxNodes {
 			break
 		}
-		if !n.disabled() && n.proxy.healthy.Load() && n.cooldownUntil.Load() <= now.UnixNano() {
+		if !n.disabled() && n.exitEligible(p.now()) && n.proxy.healthy.Load() && n.cooldownUntil.Load() <= now.UnixNano() {
 			nodes = append(nodes, n)
 		}
 	}
@@ -366,10 +375,22 @@ func (p *proxyCleanPool) check(ctx context.Context) {
 					n.proxy.publicStateMu.Unlock()
 					continue
 				}
+				if n.requireCN {
+					n.proxy.publicGeneration++
+				}
 				generation := n.proxy.publicGeneration
+				if n.requireCN {
+					n.exitEvidence.Store(nil)
+					n.proxy.healthy.Store(false)
+				}
 				n.proxy.publicStateMu.Unlock()
 				probeStarted := time.Now()
 				healthy := p.probe(ctx, n.proxy, time.Duration(p.cfg.ProbeTimeoutSeconds)*time.Second)
+				var evidence *proxyCleanExitEvidence
+				if n.requireCN && healthy {
+					evidence = p.checkExit(ctx, n)
+					healthy = evidence != nil && evidence.Country == "CN"
+				}
 				latency := time.Since(probeStarted).Milliseconds()
 				n.proxy.publicStateMu.Lock()
 				// The compare and state commit share the same lock as business updates.
@@ -380,6 +401,9 @@ func (p *proxyCleanPool) check(ctx context.Context) {
 					continue
 				}
 				n.proxy.publicGeneration++
+				if n.requireCN {
+					n.exitEvidence.Store(evidence)
+				}
 				n.lastProbeAt.Store(p.now().UnixNano())
 				n.probeLatencyMS.Store(latency)
 				n.lastProbeOK.Store(healthy)
@@ -417,6 +441,11 @@ func (p *proxyCleanPool) check(ctx context.Context) {
 }
 
 func (p *proxyCleanPool) closeIdle() {
+	// The geo client survives hot apply. Closing idle connections is safe for
+	// concurrent requests and does not close the client or reset service backoff.
+	if p.geo != nil && p.geo.closeIdle != nil {
+		p.geo.closeIdle()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, n := range p.candidates {

@@ -6,7 +6,7 @@ import (
 )
 
 // ProxyCleanSourceIDs are explicit, audited repository adapters, not arbitrary URLs.
-var ProxyCleanSourceIDs = []string{"proxyclean", "proxifly", "thespeedx", "roosterkid", "hookzof", "gfpcom", "dpangestuw"}
+var ProxyCleanSourceIDs = []string{"proxyclean", "proxifly", "thespeedx", "roosterkid", "hookzof", "gfpcom", "dpangestuw", "proxifly-cn", "xyzs-cn", "monosans-cn"}
 
 func (c ProxyCleanConfig) Equal(other ProxyCleanConfig) bool { return reflect.DeepEqual(c, other) }
 
@@ -16,6 +16,7 @@ const DefaultProxyCleanSource = "https://raw.githubusercontent.com/HankNovic/Pro
 // ProxyCleanConfig is deliberately restricted to the anonymous free lane.
 // Explicit public adapters and validated custom HTTPS text lists are supported.
 type ProxyCleanConfig struct {
+	RequiredExitCountry   string                   `json:"required_exit_country"`
 	MinHealthyNodes       int                      `json:"min_healthy_nodes"`
 	RefillIntervalSeconds int                      `json:"refill_interval_seconds"`
 	CustomSources         []ProxyCleanCustomSource `json:"custom_sources,omitempty"`
@@ -65,6 +66,12 @@ func (c *ProxyCleanConfig) Defaults() {
 }
 
 func (c ProxyCleanConfig) Validate() error {
+	if c.RequiredExitCountry != "" && c.RequiredExitCountry != "CN" {
+		return fmt.Errorf("proxyclean.required_exit_country must be empty or CN")
+	}
+	if c.RequiredExitCountry != "" && c.AllowDirectFallback {
+		return fmt.Errorf("proxyclean.allow_direct_fallback is incompatible with required_exit_country")
+	}
 	if err := validateProxyCleanCustomSources(c.CustomSources); err != nil {
 		return err
 	}

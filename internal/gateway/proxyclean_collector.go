@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -44,7 +45,7 @@ func newProxyCleanCollector(cfg config.ProxyCleanConfig) *proxyCleanCollector {
 	c := &proxyCleanCollector{cfg: cfg, client: proxyCleanSourceClient(), now: time.Now, shared: &proxyCleanCollectorState{nextFetch: map[string]time.Time{}, inFlight: map[string]bool{}, statuses: map[string]ProxyCleanSourceStatus{}}}
 	c.client.Timeout = 45 * time.Second
 	for _, id := range cfg.Sources {
-		c.sources = append(c.sources, proxyCleanInputSource{id: id, url: proxyCleanSourceURLs[id], defaultProtocol: "socks5"})
+		c.sources = append(c.sources, proxyCleanInputSource{id: id, url: proxyCleanSourceURLs[id], defaultProtocol: "socks5", multiProtocol: id == "proxifly-cn"})
 	}
 	for _, s := range cfg.CustomSources {
 		c.sources = append(c.sources, proxyCleanInputSource{id: "custom-" + config.Fingerprint(s.URL), url: s.URL, defaultProtocol: s.DefaultProtocol, multiProtocol: true})
@@ -102,7 +103,13 @@ func (c *proxyCleanCollector) fetchOne(ctx context.Context, source proxyCleanInp
 	maxBytes, timeout := proxyCleanSourceBudget(id)
 	sourceCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	nodes, err := fetchProxyList(sourceCtx, cfg, c.client, maxBytes, source.defaultProtocol, source.multiProtocol)
+	var nodes []string
+	var err error
+	if id == "xyzs-cn" || id == "monosans-cn" {
+		nodes, err = fetchProxySource(sourceCtx, cfg, c.client, func(r io.Reader) ([]string, error) { return parseChinaSource(id, r, cfg.MaxCandidates) })
+	} else {
+		nodes, err = fetchProxyList(sourceCtx, cfg, c.client, maxBytes, source.defaultProtocol, source.multiProtocol)
+	}
 	if err != nil {
 		var httpErr *proxyCleanSourceHTTPError
 		if errors.As(err, &httpErr) {

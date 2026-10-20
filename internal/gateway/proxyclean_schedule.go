@@ -19,7 +19,7 @@ func (p *proxyCleanPool) transportHealthyLocked(now time.Time) int {
 	}
 	count := 0
 	for _, n := range p.candidates {
-		if !n.disabled() && n.proxy.healthy.Load() {
+		if !n.disabled() && n.exitEligible(now) && n.proxy.healthy.Load() {
 			count++
 		}
 	}

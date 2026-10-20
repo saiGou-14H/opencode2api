@@ -128,6 +128,12 @@ func fetchProxyCleanLimit(ctx context.Context, c config.ProxyCleanConfig, client
 }
 
 func fetchProxyList(ctx context.Context, c config.ProxyCleanConfig, client *http.Client, maxBytes int64, defaultProtocol string, multiProtocol bool) ([]string, error) {
+	return fetchProxySource(ctx, c, client, func(r io.Reader) ([]string, error) {
+		return parseProxyList(r, c.MaxCandidates, maxBytes, defaultProtocol, multiProtocol)
+	})
+}
+
+func fetchProxySource(ctx context.Context, c config.ProxyCleanConfig, client *http.Client, parse func(io.Reader) ([]string, error)) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.SourceURL, nil)
 	if err != nil {
 		return nil, errors.New("source_request")
@@ -147,7 +153,7 @@ func fetchProxyList(ctx context.Context, c config.ProxyCleanConfig, client *http
 		}
 		return nil, &proxyCleanSourceHTTPError{RetryAfter: delay}
 	}
-	return parseProxyList(resp.Body, c.MaxCandidates, maxBytes, defaultProtocol, multiProtocol)
+	return parse(resp.Body)
 }
 
 // Both clients enforce end-to-end HTTPS, including the uTLS Bun SOCKS path.
