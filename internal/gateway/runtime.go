@@ -45,6 +45,7 @@ type RuntimeController struct {
 	proxyCleanDisabled *proxyCleanDisabledStore
 	proxyCleanCooldown *atomic.Int64
 	proxyCleanSources  *proxyCleanCollectorState
+	proxyCleanGeo      *proxyCleanGeo
 	rotation           *rotation.Manager
 	configPath         string
 	root               context.Context
@@ -184,6 +185,13 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 		m.proxyCleanCooldown = &atomic.Int64{}
 	}
 	if gateway.publicPool != nil {
+		// The service budget belongs to the controller, not one enabled runtime:
+		// disabling the pool or anonymous lane must not reset geo Retry-After.
+		if m.proxyCleanGeo == nil {
+			m.proxyCleanGeo = gateway.publicPool.geo
+		} else {
+			gateway.publicPool.geo = m.proxyCleanGeo
+		}
 		if m.proxyCleanSources == nil {
 			m.proxyCleanSources = gateway.publicPool.collector.shared
 		} else {
