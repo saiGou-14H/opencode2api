@@ -95,6 +95,7 @@
             <section class="section stack">
               <p class="section-caption" data-i18n="pool.hint">仅管理匿名公共代理池，付费 Key 原线路不变。采集和探活是异步任务：请求受理不代表完成，请读取状态确认。来源选择和自动开关在配置中心保存。</p>
               <p class="notice" data-i18n="pool.connectivityWarning">代理 HTTPS 连通 ≠ 模型可用。节点探活仅反映传输连通性；上游 restricted / 限流属于通道受限，不等同于代理传输故障。请分别查看节点探活结果与匿名通道受限截止时间。</p>
+              <p class="notice" data-i18n="pool.exitMeaning">出口 IP 与国家来自探测回显的地理定位，不是节点端点归属或模型就绪证明。仅 CN 模式排除香港（HK）、澳门（MO）、台湾（TW）及其他非 CN 和未知出口，传输健康不代表可路由。CN 出口证据也必须在有效期内，过期或缺少证据不能证明符合 CN 筛选。地理定位不能保证访问每个目标都使用同一出口；缺少或无效的出口字段显示为 —。</p>
               <p class="section-caption" data-i18n="pool.healthMeaning">传输健康计数仅含未禁用、未冷却的健康节点，不因上游通道受限而归零；可路由计数还受通道权限和限流约束。低水位补池不会绕过这些限制，关闭自动采集也会关闭低水位触发。</p>
               <div class="actions">
                 <button id="pool-refresh-status" type="button" class="btn" data-i18n="config.proxyclean.refreshStatus">读取运行状态（仅 GET，不触发抓取）</button>
@@ -107,7 +108,7 @@
               <div id="pool-sources" class="stack"></div>
               <h2 class="section-title" data-i18n="pool.nodes">节点</h2>
               <div class="table-wrap"><table class="table">
-                <thead><tr><th data-i18n="pool.node">节点 ID</th><th data-i18n="pool.endpoint">节点端点</th><th data-i18n="pool.health">健康状态</th><th data-i18n="pool.nodeCooldown">节点冷却截止</th><th data-i18n="pool.lastProbe">最近探活时间 / 结果</th><th data-i18n="pool.protocol">代理协议</th><th data-i18n="pool.latency">探活延迟（毫秒）</th><th data-i18n="pool.failures">连续失败次数</th><th data-i18n="pool.action">操作</th></tr></thead>
+                <thead><tr><th data-i18n="pool.node">节点 ID</th><th data-i18n="pool.endpoint">节点端点</th><th data-i18n="pool.health">健康状态</th><th data-i18n="pool.nodeCooldown">节点冷却截止</th><th data-i18n="pool.lastProbe">最近探活时间 / 结果</th><th data-i18n="pool.protocol">代理协议</th><th data-i18n="pool.latency">探活延迟（毫秒）</th><th data-i18n="pool.failures">连续失败次数</th><th data-i18n="pool.exitIP">探测出口 IP</th><th data-i18n="pool.exitCountry">出口国家代码</th><th data-i18n="pool.exitCheckedAt">出口检查时间</th><th data-i18n="pool.exitExpiresAt">出口证据有效期至</th><th data-i18n="pool.action">操作</th></tr></thead>
                 <tbody id="pool-nodes"></tbody>
               </table></div>
             </section>
@@ -914,6 +915,10 @@
                       <label class="check"><input id="c-pc-source-hookzof" type="checkbox" />Hookzof (hookzof)</label>
                       <label class="check"><input id="c-pc-source-gfpcom" type="checkbox" />GFPCom (gfpcom)</label>
                       <label class="check"><input id="c-pc-source-dpangestuw" type="checkbox" />dpangestuw</label>
+                      <label class="check"><input id="c-pc-source-proxifly-cn" type="checkbox" /><span data-i18n="config.proxyclean.sourceName.proxifly-cn">Proxifly 中国候选</span></label>
+                      <label class="check"><input id="c-pc-source-xyzs-cn" type="checkbox" /><span data-i18n="config.proxyclean.sourceName.xyzs-cn">xyzs996 中国候选</span></label>
+                      <label class="check"><input id="c-pc-source-monosans-cn" type="checkbox" /><span data-i18n="config.proxyclean.sourceName.monosans-cn">monosans 中国候选</span></label>
+                      <p class="section-caption" data-i18n="config.proxyclean.candidateHelp">中国候选仅是来源的国家标签，不代表实际出口在中国大陆。须另选实际出口筛选 CN，由探测独立验证；选择这些来源不会自动启用 CN 筛选。</p>
                       <p id="proxyclean-sources-help" class="section-caption" data-i18n="config.proxyclean.sourcesHelp">选中的来源列表生效；上方 source_url 仅为旧版兼容字段，不覆盖来源选择。允许只用自定义来源；保存时至少有一个内置或有效自定义来源。仅在加载旧配置时内置和自定义都为空才默认回填 proxyclean。单源失败不阻断其他来源；候选节点从各源轮询公平合并并去重。公共池默认仍关闭。</p>
                     </fieldset>
                     <div class="field full">
@@ -967,7 +972,15 @@
                     </div>
                     <p id="proxyclean-refill-help" class="field full section-caption" data-i18n="config.proxyclean.refillHelp">低水位默认 0 关闭，补池间隔默认 300 秒。关闭自动采集后不会触发低水位补池；通道权限或限流冷却不会通过补池绕过。定时探活仍使用上方探测间隔、超时与并发设置。</p>
                     <div class="field full">
-                      <label class="check"><input id="c-pc-fallback" type="checkbox" /><span data-i18n="config.proxyclean.fallback">显式允许空池直连回退（默认关闭，会暴露服务器出口 IP）</span></label>
+                      <label for="c-pc-exit-country" data-i18n="config.proxyclean.exitCountry">实际出口国家筛选</label>
+                      <select id="c-pc-exit-country" aria-describedby="proxyclean-exit-help">
+                        <option value="" data-i18n="config.proxyclean.exitAny">不限（兼容旧配置，默认）</option>
+                        <option value="CN" data-i18n="config.proxyclean.exitCN">仅中国大陆（CN，不含港澳台）</option>
+                      </select>
+                      <p id="proxyclean-exit-help" class="section-caption" data-i18n="config.proxyclean.exitHelp">根据探测回显的出口 IP 国家筛选，而非节点名称或来源标签。仅中国大陆模式下，未知及非 CN 出口不可路由，且禁止直连回退；选择 CN 会关闭直连回退。地理定位不代表模型就绪，也不能保证访问每个目标都使用同一出口。</p>
+                    </div>
+                    <div class="field full">
+                      <label class="check"><input id="c-pc-fallback" type="checkbox" aria-describedby="proxyclean-exit-help" /><span data-i18n="config.proxyclean.fallback">显式允许空池直连回退（默认关闭，会暴露服务器出口 IP）</span></label>
                     </div>
                   </div>
                   <button id="proxyclean-status-refresh" type="button" class="btn btn-sm" data-i18n="config.proxyclean.refreshStatus">读取运行状态（仅 GET，不触发抓取）</button>

@@ -116,9 +116,56 @@ const pcDefaults = {
   source_url: 'https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt',
   refresh_seconds: 3600, ttl_seconds: 7200, probe_interval_seconds: 300,
   probe_timeout_seconds: 8, probe_concurrency: 8, max_candidates: 100,
-  max_nodes: 20, cooldown_seconds: 60, allow_direct_fallback: false,
+  max_nodes: 20, cooldown_seconds: 60, allow_direct_fallback: false, required_exit_country: '',
 };
-const sourceIds = ['proxyclean', 'proxifly', 'thespeedx', 'roosterkid', 'hookzof', 'gfpcom', 'dpangestuw'];
+for (const country of [undefined, '', 'CN']) {
+  test(`exit country roundtrip ${country ?? 'legacy missing'} preserves unrestricted default`, async () => {
+    const h = harness(undefined, { ...pcDefaults, required_exit_country: country });
+    assert.equal(h.$('#c-pc-exit-country').value, country ?? '');
+    assert.equal(h.$('#c-pc-fallback').disabled, country === 'CN');
+    await h.context.save({ preventDefault() {} });
+    assert.equal(h.calls[0].body.proxyclean.required_exit_country, country ?? '');
+    assert.equal(h.calls[0].body.proxyclean.allow_direct_fallback, false);
+  });
+}
+
+test('selecting CN clears and disables fallback; unrestricted does not silently restore it', () => {
+  const h = harness(undefined, { ...pcDefaults, allow_direct_fallback: true });
+  h.$('#c-pc-exit-country').value = 'CN';
+  h.context.syncExitCountry(true);
+  assert.equal(h.$('#c-pc-fallback').checked, false);
+  assert.equal(h.$('#c-pc-fallback').disabled, true);
+  h.$('#c-pc-exit-country').value = '';
+  h.context.syncExitCountry(true);
+  assert.equal(h.$('#c-pc-fallback').checked, false);
+  assert.equal(h.$('#c-pc-fallback').disabled, false);
+  assert.match(source, /\$\("#c-pc-exit-country"\)\.addEventListener\("change", \(\) => syncExitCountry\(true\)\)/);
+});
+
+for (const country of ['CN', 'HK', 'MO', 'TW', 'US', 'cn', 'invalid']) {
+  test(`incompatible fallback or unsupported country ${country} blocks save`, async () => {
+    const h = harness(undefined, { ...pcDefaults, required_exit_country: country, allow_direct_fallback: true });
+    await h.context.save({ preventDefault() {} });
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.notices[0][1], true);
+  });
+}
+
+test('exit filter has accessible bilingual labels and clear probe/routing limitations', () => {
+  const context = vm.createContext({});
+  vm.runInContext(translations.replace(/^export /gm, '') + '\nglobalThis.en = DICTIONARY.en;', context);
+  assert.match(html, /label for="c-pc-exit-country"/);
+  assert.match(html, /select id="c-pc-exit-country" aria-describedby="proxyclean-exit-help"/);
+  assert.match(html, /option value="" data-i18n="config.proxyclean.exitAny"/);
+  assert.match(html, /option value="CN" data-i18n="config.proxyclean.exitCN"/);
+  for (const key of ['exitCountry', 'exitAny', 'exitCN', 'exitHelp', 'invalidExitCountry', 'exitFallbackInvalid']) assert.ok(context.en[`config.proxyclean.${key}`]);
+  assert.match(context.en['config.proxyclean.exitHelp'], /unknown and non-CN exits cannot route/);
+  assert.match(context.en['config.proxyclean.exitHelp'], /every destination uses the same exit/);
+  assert.match(html, /未知及非 CN 出口不可路由/);
+  assert.match(html, /不能保证访问每个目标都使用同一出口/);
+});
+
+const sourceIds = ['proxyclean', 'proxifly', 'thespeedx', 'roosterkid', 'hookzof', 'gfpcom', 'dpangestuw', 'proxifly-cn', 'xyzs-cn', 'monosans-cn'];
 for (const sources of [undefined, [], ['proxyclean'], sourceIds.slice(1), sourceIds]) {
   test(`ProxyClean sources roundtrip ${sources?.join(',') || 'legacy default'}`, async () => {
     const expected = sources?.length ? sources : ['proxyclean'];

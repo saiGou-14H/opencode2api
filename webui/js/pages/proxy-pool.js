@@ -9,7 +9,7 @@ let operation = "";
 let sessionGeneration = 0;
 let readGeneration = 0;
 const busy = new Set();
-const sourceIds = ["proxyclean", "proxifly", "thespeedx", "roosterkid", "hookzof", "gfpcom", "dpangestuw"];
+const sourceIds = ["proxyclean", "proxifly", "thespeedx", "roosterkid", "hookzof", "gfpcom", "dpangestuw", "proxifly-cn", "xyzs-cn", "monosans-cn"];
 const safeCode = (value) => typeof value === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(value) ? value : "—";
 const count = (value) => Number.isSafeInteger(value) && value >= 0 ? value : "—";
 const timestamp = (value) => typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : "—";
@@ -37,7 +37,8 @@ function render() {
     if (!source || typeof source.id !== "string") continue;
     const custom = /^custom-[0-9a-f]{16}$/.test(source.id);
     if (!custom && !sourceIds.includes(source.id)) continue;
-    const name = custom ? t(`自定义来源 ${source.id.slice(7, 15)}`, "config.proxyclean.customName", source.id.slice(7, 15)) : source.id;
+    const candidateNames = { "proxifly-cn": "Proxifly 中国候选", "xyzs-cn": "xyzs996 中国候选", "monosans-cn": "monosans 中国候选" };
+    const name = custom ? t(`自定义来源 ${source.id.slice(7, 15)}`, "config.proxyclean.customName", source.id.slice(7, 15)) : Object.hasOwn(candidateNames, source.id) ? t(candidateNames[source.id], `config.proxyclean.sourceName.${source.id}`) : source.id;
     const state = Object.hasOwn(labels, source.status) ? t(labels[source.status], `config.proxyclean.sourceState.${source.status}`) : "—";
     const time = timestamp(source.last_fetch_at);
     sources.append(el("p", { text: t(`${name}：${state}；候选：${count(source.candidate_count)}；最近采集：${time}；安全码：${safeCode(source.last_error)}`, "config.proxyclean.sourceStatus", name, state, count(source.candidate_count), time, safeCode(source.last_error)) }));
@@ -62,10 +63,14 @@ function render() {
       el("td", { text: ["http", "https", "socks5", "socks5h"].includes(node.protocol) ? node.protocol.toUpperCase() : "—" }),
       el("td", { text: typeof node.probe_latency_ms === "number" && Number.isFinite(node.probe_latency_ms) && node.probe_latency_ms >= 0 ? String(node.probe_latency_ms) : "—" }),
       el("td", { text: count(node.consecutive_failures) }),
+      el("td", { text: typeof node.exit_ip === "string" && node.exit_ip.length <= 45 && /^(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|[0-9a-fA-F]*:[0-9a-fA-F:.]+)$/.test(node.exit_ip) ? node.exit_ip : "—" }),
+      el("td", { text: typeof node.exit_country === "string" && /^[A-Z]{2}$/.test(node.exit_country) ? (node.exit_country === "CN" ? "CN" : t(`${node.exit_country}（CN 模式不允许）`, "pool.exitExcluded", node.exit_country)) : "—" }),
+      el("td", { text: timestamp(node.exit_checked_at) }),
+      el("td", { text: timestamp(node.exit_expires_at) }),
       el("td", {}, [button]),
     ]));
   }
-  if (!nodes.length) body.append(el("tr", {}, [el("td", { colspan: 9, text: t("暂无节点", "pool.empty") })]));
+  if (!nodes.length) body.append(el("tr", {}, [el("td", { colspan: 13, text: t("暂无节点", "pool.empty") })]));
 }
 
 async function refresh() {

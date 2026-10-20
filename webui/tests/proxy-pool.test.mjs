@@ -19,7 +19,7 @@ function fixture() {
   const context = vm.createContext({ $, el, t: (original) => original, onChange() {},
     api: async (path, options = {}) => {
       calls.push({ path, ...options });
-      if (path === '/api/proxyclean/nodes') return { nodes: [{ id: 'opaque/one', endpoint: '192.0.2.1:1080', healthy: true, disabled: false, cooldown_until: '2026-01-01T00:00:00Z', last_probe_at: '2026-01-01T01:00:00Z', last_probe_ok: true }, { id: 'two', disabled: true, last_probe_ok: false }], total: 2, operation: '' };
+      if (path === '/api/proxyclean/nodes') return { nodes: [{ id: 'opaque/one', endpoint: '192.0.2.1:1080', healthy: true, disabled: false, cooldown_until: '2026-01-01T00:00:00Z', last_probe_at: '2026-01-01T01:00:00Z', last_probe_ok: true, exit_ip: '203.0.113.8', exit_country: 'CN', exit_checked_at: '2026-01-01T01:00:01Z', exit_expires_at: '2026-01-01T01:05:01Z' }, { id: 'two', disabled: true, last_probe_ok: false }], total: 2, operation: '' };
       if (path === '/api/proxyclean') return { source_status: 'ready', candidate_count: 10, healthy_count: 2, cooldown_until: '2026-01-01T02:00:00Z', sources: [{ id: 'proxifly', status: 'ready', candidate_count: 10 }] };
       return path.endsWith('/disable') || path.endsWith('/enable') ? { ok: true } : { accepted: true, operation: path.endsWith('/probe') ? 'probe' : 'refresh' };
     },
@@ -69,8 +69,8 @@ test('node disable/enable buttons use encoded IDs and POST with no secret payloa
   const h = fixture();
   await h.context.page.show();
   const rows = h.$('#pool-nodes').children;
-  await rows[0].children[8].children[0].events.click();
-  await rows[1].children[8].children[0].events.click();
+  await rows[0].children[12].children[0].events.click();
+  await rows[1].children[12].children[0].events.click();
   assert.deepEqual(h.calls.filter((call) => call.method === 'POST'), [
     { path: '/api/proxyclean/nodes/opaque%2Fone/disable', method: 'POST' },
     { path: '/api/proxyclean/nodes/two/enable', method: 'POST' },
@@ -212,6 +212,34 @@ test('new controls have bilingual labels and explicit duplicate-charge warning',
   assert.match(html, /2xx.*重复计费/);
   assert.match(context.en['config.retry.sameAccountHelp'], /2xx.*duplicate charges/);
   assert.match(context.en['config.retry.sameAccountHelp'], /max_attempts hard limit/);
+});
+
+test('optional exit fields render safely and do not infer routing or country from endpoint', async () => {
+  const h = fixture();
+  await h.context.page.show();
+  const first = h.$('#pool-nodes').children[0].children;
+  assert.equal(first[8].text, '203.0.113.8');
+  assert.equal(first[9].text, 'CN');
+  assert.equal(first[10].text, '2026-01-01T01:00:01.000Z');
+  assert.equal(first[11].text, '2026-01-01T01:05:01.000Z');
+  for (const cell of h.$('#pool-nodes').children[1].children.slice(8, 12)) assert.equal(cell.text, '—');
+  h.context.api = async (path) => path.endsWith('/nodes') ? { nodes: [
+    { id: 'bad', exit_ip: '<img src=x>', exit_country: '<script>', exit_checked_at: 'bad', exit_expires_at: '<script>' },
+    { id: 'typed', exit_ip: {}, exit_country: ['CN'], exit_checked_at: 123, exit_expires_at: {} },
+    ...['HK', 'MO', 'TW', 'US'].map((country) => ({ id: country, healthy: true, endpoint: 'CN node', exit_country: country, exit_ip: '2001:db8::1' })),
+  ], total: 6 } : {};
+  await h.context.page.refresh();
+  const rows = h.$('#pool-nodes').children;
+  for (const row of rows.slice(0, 2)) for (const cell of row.children.slice(8, 12)) assert.equal(cell.text, '—');
+  for (const [i, country] of ['HK', 'MO', 'TW', 'US'].entries()) {
+    assert.equal(rows[i + 2].children[9].text, `${country}（CN 模式不允许）`);
+    assert.equal(rows[i + 2].children[8].text, '2001:db8::1');
+  }
+  assert.match(html, /仅 CN 模式排除香港（HK）、澳门（MO）、台湾（TW）/);
+  assert.match(html, /不是节点端点归属或模型就绪证明/);
+  h.context.page.reset();
+  assert.match(html, /CN 出口证据也必须在有效期内/);
+  assert.equal(h.$('#pool-nodes').children[0].children[0].colspan, 13);
 });
 
 test('API helper adds CSRF to POST, accepts 202 and preserves 409 status', async () => {

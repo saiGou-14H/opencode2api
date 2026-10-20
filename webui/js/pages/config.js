@@ -81,7 +81,7 @@ function retryInputs() {
 }
 
 const proxyCleanSource = "https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt";
-const proxyCleanSourceIds = ["proxyclean", "proxifly", "thespeedx", "roosterkid", "hookzof", "gfpcom", "dpangestuw"];
+const proxyCleanSourceIds = ["proxyclean", "proxifly", "thespeedx", "roosterkid", "hookzof", "gfpcom", "dpangestuw", "proxifly-cn", "xyzs-cn", "monosans-cn"];
 // Defaults and bounds mirror the restricted backend contract.
 const proxyCleanNumbers = {
   refresh_seconds: [3600, 30, 86400],
@@ -142,9 +142,18 @@ function customSourceInputs() {
   });
 }
 
+function syncExitCountry(clearFallback = false) {
+  const mainlandOnly = $("#c-pc-exit-country").value === "CN";
+  const fallback = $("#c-pc-fallback");
+  if (mainlandOnly && clearFallback) fallback.checked = false;
+  fallback.disabled = mainlandOnly;
+}
+
 function fillProxyClean(value = {}) {
+  $("#c-pc-exit-country").value = value.required_exit_country ?? "";
   $("#c-pc-enabled").checked = !!value.enabled;
   $("#c-pc-fallback").checked = !!value.allow_direct_fallback;
+  syncExitCountry();
   $("#c-pc-auto-switch").checked = value.auto_switch_proxy ?? true;
   $("#c-pc-auto-collect").checked = value.auto_collect ?? true;
   $("#c-pc-scope").value = value.scope ?? "anonymous-only";
@@ -164,6 +173,13 @@ function fillProxyClean(value = {}) {
 }
 
 function proxyCleanInputs() {
+  const requiredExitCountry = $("#c-pc-exit-country").value;
+  if (!["", "CN"].includes(requiredExitCountry)) {
+    throw new Error(t("出口国家筛选仅支持不限或中国大陆（CN）", "config.proxyclean.invalidExitCountry"));
+  }
+  if (requiredExitCountry === "CN" && $("#c-pc-fallback").checked) {
+    throw new Error(t("仅中国大陆出口不能启用直连回退；请重新选择出口筛选以关闭回退后保存", "config.proxyclean.exitFallbackInvalid"));
+  }
   const sources = proxyCleanSourceIds.filter((id) => $("#c-pc-source-" + id).checked);
   const customSources = customSourceInputs();
   if (!sources.length && !customSources.length) {
@@ -175,6 +191,7 @@ function proxyCleanInputs() {
     enabled: $("#c-pc-enabled").checked,
     scope: "anonymous-only",
     source_url: proxyCleanSource,
+    required_exit_country: requiredExitCountry,
     allow_direct_fallback: $("#c-pc-fallback").checked,
     auto_switch_proxy: $("#c-pc-auto-switch").checked,
     auto_collect: $("#c-pc-auto-collect").checked,
@@ -234,7 +251,8 @@ function renderProxyCleanStatus() {
     if (!source || typeof source.id !== "string" || seen.has(source.id)) continue;
     const custom = /^custom-[0-9a-f]{16}$/.test(source.id);
     if (!custom && !proxyCleanSourceIds.includes(source.id)) continue;
-    const name = custom ? t(`自定义来源 ${source.id.slice(7, 15)}`, "config.proxyclean.customName", source.id.slice(7, 15)) : source.id;
+    const candidateNames = { "proxifly-cn": "Proxifly 中国候选", "xyzs-cn": "xyzs996 中国候选", "monosans-cn": "monosans 中国候选" };
+    const name = custom ? t(`自定义来源 ${source.id.slice(7, 15)}`, "config.proxyclean.customName", source.id.slice(7, 15)) : Object.hasOwn(candidateNames, source.id) ? t(candidateNames[source.id], `config.proxyclean.sourceName.${source.id}`) : source.id;
     seen.add(source.id);
     const state = Object.hasOwn(sourceStates, source.status)
       ? t(sourceStates[source.status], `config.proxyclean.sourceState.${source.status}`)
@@ -432,6 +450,7 @@ export default {
     $("#reload-config").addEventListener("click", reload);
     $("#reveal").addEventListener("click", reveal);
     $("#proxyclean-status-refresh").addEventListener("click", refreshProxyCleanStatus);
+    $("#c-pc-exit-country").addEventListener("change", () => syncExitCountry(true));
     $("#c-pc-custom-sources").addEventListener("input", renderCustomProtocols);
     $("#c-pc-custom-protocol").addEventListener("change", renderCustomProtocols);
     $("#c-pc-custom-protocol-apply").addEventListener("click", applyCustomProtocolToAll);

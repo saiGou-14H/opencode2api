@@ -15,8 +15,15 @@
 | `hookzof` | [hookzof/socks5_list](https://github.com/hookzof/socks5_list) |
 | `gfpcom` | [gfpcom/free-proxy-list](https://github.com/gfpcom/free-proxy-list) |
 | `dpangestuw` | [dpangestuw/Free-Proxy](https://github.com/dpangestuw/Free-Proxy) |
+| `proxifly-cn` | [Proxifly CN文本](https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/CN/data.txt)，保留多协议前缀 |
+| `xyzs-cn` | [xyzs996 CN JSON](https://raw.githubusercontent.com/xyzs996/free-proxy-health-list/main/proxies/countries/cn/data.json)，按协议解析 |
+| `monosans-cn` | [monosans JSON](https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json)，筛选country.iso_code==CN |
 
-采集并发上限为 3，每个来源有独立请求超时和体积限制（ProxyClean 2 MiB/20 秒，gfpcom wiki 32 MiB/45 秒，其余 4 MiB/25 秒）；仅接纳 SOCKS5 候选，统一规范化、轮询公平合并及去重后再探活。单源失败不阻断其他源；失败源不把旧地址重新注入新快照。全部来源失败时，仅保留原快照至其原始 TTL，不无限延期。状态接口和管理界面显示每源候选数、最近采集时间与安全错误码；候选数不等于已探活数量。
+三个CN适配器只提供**发布方标记的中国候选**，实际准入仍需开启 `required_exit_country: "CN"`。xyzs996 的 `https_connect_probe` 表示HTTP代理支持CONNECT到HTTPS目标，适配为 `http://`，不能混同为到代理本身也使用TLS的 `https://`。未支持的SOCKS4被丢弃。CN JSON源每个限4MiB，不递归抓取其中的链接。
+
+2026-10-20核实：以上三个数据文件当日有提交且GET200；这不保证节点在线。另查vakhov/fresh-proxy-list虽然仓库有近期提交，代理数据文件最后修改却在2026-02-07，未选用。ProxyClean的“国内可用”指可访问性，不代表出口位于中国大陆。
+
+采集并发上限为 3，每个来源有独立请求超时和体积限制（ProxyClean 2 MiB/20 秒，gfpcom wiki 32 MiB/45 秒，其余 4 MiB/25 秒）；原七个适配器仅接纳 SOCKS5，新增CN适配器按来源格式接纳受支持的HTTP/HTTPS/SOCKS5/SOCKS5H候选，统一规范化、轮询公平合并及去重后再探活。单源失败不阻断其他源；失败源不把旧地址重新注入新快照。全部来源失败时，仅保留原快照至其原始 TTL，不无限延期。状态接口和管理界面显示每源候选数、最近采集时间与安全错误码；候选数不等于已探活数量。
 
 选择六个直接源的示例：
 
@@ -47,6 +54,22 @@
 
 去重键包含协议，因此同IP端口的 HTTP 与 SOCKS5 不会合并。内置源仍按其声明的 SOCKS5 解析，防止把不明混合内容错误识别为代理。HTTP代理使用CONNECT承载目标HTTPS，HTTPS代理还验证代理端TLS；两种客户端均不能关闭证书校验。
 
+## 中国大陆出口准入
+
+`proxyclean.required_exit_country` 默认空字符串（不限制国家）；设置为 `"CN"` 时只接受**已检测为中国大陆出口**的公共节点，不包含香港（HK）、澳门（MO）、台湾（TW）。CN模式禁止同时开启 `allow_direct_fallback`。没有合格节点时返回不可用，不自动回退海外节点或付费线路。
+
+仅CN候选的配置片段（合并到原配置，不覆盖账号和密钥）：
+
+```json
+{"proxyclean":{"sources":["proxifly-cn","xyzs-cn","monosans-cn"],"custom_sources":[],"required_exit_country":"CN","allow_direct_fallback":false}}
+```
+
+中国候选源的维护许可：Proxifly GPL-3.0、xyzs996与monosans MIT；许可不保证被收录代理的安全或使用授权，不打包原始地址清单进本仓库。
+
+来源的国家标签只是候选信息，不能替代实际出口检查。节点必须先通过目标HTTPS连通性探活，再通过该节点访问固定HTTPS IP回显服务取得出口IP，使用固定地理查询服务验证country_code。非CN、未知、超时或证据过期的节点都不能入可路由池。节点视图包含 `exit_ip`、`exit_country`、`exit_checked_at`、`exit_expires_at`。
+
+**限制：**这里验证的是访问IP回显服务时的出口；按目的地动态选路的代理可能对模型站点使用不同出口，地理数据库也可能不准确或更新滞后，因此它不是对所有目标的绝对地域保证。要求稳定、可合同保证的中国大陆出口，应使用可信的固定出口代理服务。本功能不保证模型权限，不用于绕过上游401/403/429限制，也不因换国家清除通道冷却。
+
 ## 安全与启用边界
 
 - 默认 `proxyclean.enabled=false`；管理员需明确开启。
@@ -68,7 +91,8 @@
 |---|---:|---|
 | `proxyclean.enabled` | false | 是否启用匿名代理池 |
 | `proxyclean.scope` | anonymous-only | 固定匿名范围 |
-| `proxyclean.sources` | ["proxyclean"] | 选择七个固定来源中的一个或多个；可仅使用custom_sources |
+| `proxyclean.sources` | ["proxyclean"] | 选择十个固定来源中的一个或多个；可仅使用custom_sources |
+| `proxyclean.required_exit_country` | 空 | 空不限制，CN仅允许有新鲜中国大陆出口证据的节点；CN禁止直连兜底 |
 | `proxyclean.custom_sources` | [] | 最多10个{url,default_protocol}自定义公网HTTPS文本来源 |
 | `proxyclean.auto_switch_proxy` | true（省略） | 匿名公共池故障是否切换到其他代理；不改变付费Key线路 |
 | `proxyclean.auto_collect` | true（省略） | 是否启动/定时自动采集；false时仍允许管理员手动采集 |
