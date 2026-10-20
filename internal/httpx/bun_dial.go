@@ -169,6 +169,36 @@ func proxyAddr(proxy *url.URL) string {
 	return net.JoinHostPort(proxy.Hostname(), port)
 }
 
+// connectHeaderLimit bounds untrusted proxy status lines and response headers.
+// It applies only during CONNECT negotiation, never to the established tunnel.
+const connectHeaderLimit = 64 << 10
+
+var errConnectHeadersTooLarge = errors.New("proxy CONNECT response headers exceed 64 KiB")
+
+type connectHeaderReader struct {
+	r         io.Reader
+	remaining int
+	unlimited bool
+}
+
+func (r *connectHeaderReader) Read(p []byte) (int, error) {
+	if r.unlimited {
+		return r.r.Read(p)
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.remaining == 0 {
+		return 0, errConnectHeadersTooLarge
+	}
+	if len(p) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.r.Read(p)
+	r.remaining -= n
+	return n, err
+}
+
 // httpConnect asks an HTTP proxy on conn for a tunnel to addr, with Basic
 // Proxy-Authorization when user is set. Bytes the proxy sent past its 2xx
 // answer are kept in front of the returned connection.
@@ -181,14 +211,24 @@ func httpConnect(conn net.Conn, user *url.Userinfo, addr string) (net.Conn, erro
 	if _, err := io.WriteString(conn, request+"\r\n"); err != nil {
 		return conn, err
 	}
-	reader := bufio.NewReader(conn)
+	headerReader := &connectHeaderReader{r: conn, remaining: connectHeaderLimit}
+	reader := bufio.NewReader(headerReader)
 	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
+		// net/textproto may replace an underlying budget error with a malformed
+		// header error when exhaustion splits a line. Normalize at this boundary.
+		if headerReader.remaining == 0 {
+			_ = conn.Close()
+			return conn, errConnectHeadersTooLarge
+		}
 		return conn, err
 	}
 	if resp.StatusCode/100 != 2 {
 		return conn, fmt.Errorf("proxy refused CONNECT: %s", resp.Status)
 	}
+	// ReadResponse has consumed the complete headers. Any prefetched tunnel
+	// bytes remain in reader; subsequent reads must no longer have a budget.
+	headerReader.unlimited = true
 	if reader.Buffered() > 0 {
 		return &bufferedConn{Conn: conn, reader: reader}, nil
 	}
